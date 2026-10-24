@@ -22,9 +22,9 @@ import kotlin.math.max
 
 /** 확정 인식 방식 */
 enum class FinalMode(val label: String) {
-    ENSEMBLE("세 모델 합치기: 위스퍼 큰 것+작은 것+SenseVoice (권장)"),
+    SENSE_VOICE("SenseVoice (권장 · 가장 정확하고 빠름)"),
+    ENSEMBLE("세 모델 합치기: 위스퍼 큰 것+작은 것+SenseVoice"),
     WHISPER("위스퍼만"),
-    SENSE_VOICE("SenseVoice만"),
     OFFLINE_KO("한국어 전용만"),
     NONE("확정 없이 실시간 결과 그대로"),
 }
@@ -42,6 +42,8 @@ data class Options(
     val denoise: Boolean,
     val mic: MicMode,
     val gain: Float,
+    val speakers: Boolean,
+    val speakerThreshold: Float,
 )
 
 /** 확정 인식에 들어가는 모델 이름 (우선순위 순) */
@@ -63,6 +65,7 @@ object Engines {
             FinalMode.NONE -> {}
         }
         if (o.denoise) l += Models.DENOISE
+        if (o.speakers) l += Models.SPEAKER
         return l
     }
 }
@@ -74,6 +77,8 @@ data class FinalResult(
     val startMs: Long,
     val endMs: Long,
     val latencyMs: Long,
+    /** 화자 번호 (0이면 모름) */
+    val speaker: Int = 0,
 )
 
 interface TranscriberListener {
@@ -109,6 +114,7 @@ class Transcriber(
     private var stream: OnlineStream? = null
     private var segmenter: Segmenter? = null
     private var denoiser: OfflineSpeechDenoiser? = null
+    private var tracker: SpeakerTracker? = null
     private val engines = linkedMapOf<String, OfflineRecognizer>()
 
     fun start() {
@@ -131,7 +137,7 @@ class Transcriber(
             segWorker.awaitTermination(120, TimeUnit.SECONDS)
             pool.shutdown()
             listOf<() -> Unit>(
-                { stream?.release() }, { online?.release() }, { segmenter?.release() }, { denoiser?.release() },
+                { stream?.release() }, { online?.release() }, { segmenter?.release() }, { denoiser?.release() }, { tracker?.release() },
             ).forEach { try { it() } catch (_: Throwable) {} }
             engines.values.forEach { try { it.release() } catch (_: Throwable) {} }
             listener.onInterim("")
@@ -167,6 +173,7 @@ class Transcriber(
 
         segmenter = Segmenter(models.onnx(Models.VAD)) { samples, start -> emit(samples, start) }
         if (opt.denoise) denoiser = Recognizers.denoiser(models)
+        if (opt.speakers) tracker = SpeakerTracker(models.onnx(Models.SPEAKER), opt.speakerThreshold)
 
         val th = if (opt.mode == FinalMode.ENSEMBLE) 2 else 4
         when (opt.mode) {
@@ -198,8 +205,9 @@ class Transcriber(
 
     private fun recognize(samples: FloatArray, snapshot: String, startMs: Long, endMs: Long, endedAt: Long) {
         try {
+            val spk = try { tracker?.assign(samples) ?: 0 } catch (_: Throwable) { 0 }
             if (engines.isEmpty()) {
-                if (snapshot.isNotBlank()) listener.onFinal(FinalResult(snapshot, emptySet(), emptyMap(), startMs, endMs, 0))
+                if (snapshot.isNotBlank()) listener.onFinal(FinalResult(snapshot, emptySet(), emptyMap(), startMs, endMs, 0, spk))
                 return
             }
             val clean = denoiser?.let { Recognizers.denoise(it, samples) } ?: samples
@@ -211,7 +219,7 @@ class Transcriber(
             val combined = Combiner.combine(ordered)
             val text = combined.text.ifBlank { snapshot }
             if (text.isNotBlank()) {
-                listener.onFinal(FinalResult(text, combined.uncertain, hyps, startMs, endMs, System.currentTimeMillis() - endedAt))
+                listener.onFinal(FinalResult(text, combined.uncertain, hyps, startMs, endMs, System.currentTimeMillis() - endedAt, spk))
             }
         } catch (t: Throwable) {
             listener.onError("확정 인식 오류: ${t.message}")

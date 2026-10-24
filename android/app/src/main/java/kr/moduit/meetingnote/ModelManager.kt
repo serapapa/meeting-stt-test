@@ -23,6 +23,7 @@ data class ModelSpec(
 object Models {
     private const val ASR = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
     private const val ENH = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/"
+    private const val SPK = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/"
 
     val VAD = ModelSpec("vad", "말소리 구간 감지", ASR + "silero_vad.onnx", false, "vad")
     val STREAM_KO = ModelSpec(
@@ -51,6 +52,7 @@ object Models {
         "sherpa-onnx-whisper-turbo", skipFullPrecision = true,
     )
     val DENOISE = ModelSpec("denoise", "잡음 제거", ENH + "gtcrn_simple.onnx", false, "denoise")
+    val SPEAKER = ModelSpec("speaker", "화자 구분", SPK + "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx", false, "speaker")
 }
 
 class ModelManager(private val context: Context) {

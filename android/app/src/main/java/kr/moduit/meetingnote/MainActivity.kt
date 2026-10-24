@@ -32,6 +32,12 @@ import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.EditText
+import android.app.AlertDialog
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.style.UnderlineSpan
+import android.text.InputType
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -74,6 +80,15 @@ class MainActivity : Activity(), TranscriberListener {
     private lateinit var btnBatch: Button
     private lateinit var btnAllModels: Button
     private var batch: BatchTester? = null
+    private lateinit var spSpeaker: Spinner
+    private lateinit var cbFix: CheckBox
+    private lateinit var etTerms: EditText
+    private lateinit var etPairs: EditText
+    private lateinit var etKeep: EditText
+    private var fixer = TermFixer(TermFixer.DEFAULT_TERMS, TermFixer.DEFAULT_PAIRS, TermFixer.DEFAULT_KEEP)
+    private val speakerNames = mutableMapOf<Int, String>()
+    private val speakerColors = listOf("#1F6FEB", "#1E7A46", "#B26A00", "#8E44AD", "#C2185B", "#00838F").map { Color.parseColor(it) }
+    private val thresholds = listOf(0.5f, 0.4f, 0.6f)
     private lateinit var linesBox: LinearLayout
     private lateinit var interimView: TextView
     private lateinit var logScroll: ScrollView
@@ -221,7 +236,7 @@ class MainActivity : Activity(), TranscriberListener {
         val setCard = card()
         setCard.addView(label("설정 (다음 시작부터 적용)", 12f, cMuted, true))
         setCard.addView(label("확정 인식 방식", 13f), lp(top = 6))
-        spMode = spinner(FinalMode.values().map { it.label }, "mode2", 0) { refreshModels() }
+        spMode = spinner(FinalMode.values().map { it.label }, "mode3", 0) { refreshModels() }
         setCard.addView(spMode)
         setCard.addView(label("위스퍼 크기 (위스퍼만 쓸 때)", 13f), lp(top = 6))
         spWhisper = spinner(listOf("작은 것 (빠름)", "큰 것 (정확, 느림)"), "whisper", 0) { refreshModels() }
@@ -236,6 +251,10 @@ class MainActivity : Activity(), TranscriberListener {
         spGain = spinner(gains.map { "${it.toInt()}배" }, "gain2", 4) {}
         setCard.addView(spGain)
         setCard.addView(label("위 막대가 말할 때 절반쯤 차면 적당합니다.", 12f), lp(top = 4))
+        setCard.addView(label("화자 구분", 13f), lp(top = 6))
+        spSpeaker = spinner(listOf("켬 · 보통", "켬 · 같은 사람으로 더 잘 묶음", "켬 · 다른 사람으로 더 잘 나눔", "끔"), "speaker", 0) { refreshModels() }
+        setCard.addView(spSpeaker)
+        setCard.addView(label("두 사람이 한 사람으로 묶이면 '더 잘 나눔', 한 사람이 여럿으로 쪼개지면 '더 잘 묶음'을 고르세요. 기록의 문장을 길게 누르면 화자 이름을 바꿀 수 있습니다.", 12f), lp(top = 4))
 
         val modelCard = card()
         modelCard.addView(label("음성 모델 (지금 설정에 필요한 것)", 12f, cMuted, true))
@@ -288,7 +307,41 @@ class MainActivity : Activity(), TranscriberListener {
         scriptBox.addView(button("받아쓴 기록을 원고와 비교하기") { compare() }, lp(top = 10).apply { height = dp(44) })
         scCard.addView(scriptBox)
 
+        // 내 용어사전
+        val dictCard = card()
+        dictCard.addView(label("내 용어사전", 12f, cMuted, true))
+        cbFix = CheckBox(this).apply {
+            text = "용어사전으로 자동 교정"; setTextColor(cInk); textSize = 14f
+            isChecked = prefs.getBoolean("fixOn", true)
+            setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("fixOn", v).apply(); rerenderLog() }
+        }
+        dictCard.addView(cbFix, lp(top = 4))
+        fun area(lbl: String, key: String, def: String, rows: Int): EditText {
+            dictCard.addView(label(lbl, 12f), lp(top = 8))
+            return EditText(this).apply {
+                setText(prefs.getString(key, def)); textSize = 14f; setTextColor(cInk)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                minLines = rows; maxLines = rows * 3
+                background = GradientDrawable().apply { setColor(cBg); cornerRadius = dp(8).toFloat(); setStroke(dp(1), cLine) }
+                setPadding(dp(10), dp(8), dp(10), dp(8))
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(e: Editable?) { prefs.edit().putString(key, e.toString()).apply(); scheduleFixerRebuild() }
+                })
+            }.also { dictCard.addView(it, lp(top = 4)) }
+        }
+        etTerms = area("용어 — 한 줄에 하나. 영어·줄임말은 '용어 = 읽는 소리, 읽는 소리'", "dictTerms", TermFixer.DEFAULT_TERMS, 5)
+        etPairs = area("자주 틀리는 말 — 한 줄에 '틀린 말 → 바른 말'", "dictPairs", TermFixer.DEFAULT_PAIRS, 3)
+        etKeep = area("고치지 않을 말 — 쉼표로 구분 (용어와 소리는 비슷하지만 원래 뜻대로 쓰는 말)", "dictKeep", TermFixer.DEFAULT_KEEP, 1)
+        dictCard.addView(button("처음 사전으로 되돌리기") {
+            etTerms.setText(TermFixer.DEFAULT_TERMS); etPairs.setText(TermFixer.DEFAULT_PAIRS); etKeep.setText(TermFixer.DEFAULT_KEEP)
+        }, lp(top = 8).apply { height = dp(44) })
+        dictCard.addView(label("고친 단어는 기록에서 밑줄로 표시되고, 문장을 누르면 원래 들린 말이 보입니다.", 12f), lp(top = 4))
+        rebuildFixer()
+
         left.addView(scCard)
+        left.addView(dictCard, lp(top = 12))
         left.addView(recCard, lp(top = 12))
         left.addView(setCard, lp(top = 12))
         left.addView(modelCard, lp(top = 12))
@@ -330,13 +383,15 @@ class MainActivity : Activity(), TranscriberListener {
             denoise = spDenoise.selectedItemPosition == 1,
             mic = mic,
             gain = gains[spGain.selectedItemPosition],
+            speakers = spSpeaker.selectedItemPosition < 3,
+            speakerThreshold = thresholds[spSpeaker.selectedItemPosition.coerceAtMost(2)],
         )
     }
 
     private fun neededModels(): List<ModelSpec> = Engines.needed(options())
 
     private fun refreshModels() {
-        if (!::spMic.isInitialized || !::modelStatus.isInitialized || !::btnAllModels.isInitialized) return
+        if (!::spSpeaker.isInitialized || !::modelStatus.isInitialized || !::btnAllModels.isInitialized) return
         val sb = StringBuilder()
         neededModels().forEach { m ->
             val ready = models.isReady(m)
@@ -355,7 +410,7 @@ class MainActivity : Activity(), TranscriberListener {
         }
     }
 
-    private fun allCompareModels() = listOf(Models.VAD, Models.SENSE_VOICE, Models.OFFLINE_KO, Models.WHISPER_SMALL, Models.WHISPER_TURBO, Models.DENOISE)
+    private fun allCompareModels() = listOf(Models.VAD, Models.SENSE_VOICE, Models.OFFLINE_KO, Models.WHISPER_SMALL, Models.WHISPER_TURBO, Models.DENOISE, Models.SPEAKER)
 
     private fun downloadNeeded(list: List<ModelSpec>) {
         if (downloading) return
@@ -431,7 +486,8 @@ class MainActivity : Activity(), TranscriberListener {
         if (!models.isReady(Models.VAD)) { statusView.text = "말소리 구간 감지 모델을 먼저 내려받아 주세요"; return }
         clearLogNow()
         compareView.visibility = View.GONE
-        val b = BatchTester(models, f) { msg -> ui.post { statusView.text = msg } }
+        speakerNames.clear()
+        val b = BatchTester(models, f, thresholds[spSpeaker.selectedItemPosition.coerceAtMost(2)]) { msg -> ui.post { statusView.text = msg } }
         batch = b
         setBusyUi(true, "비교하는 중…")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -449,16 +505,21 @@ class MainActivity : Activity(), TranscriberListener {
 
     private fun showBatch(r: BatchResult, name: String) {
         val ref = plain(script.joinToString("") { it.second })
-        data class Row(val key: String, val acc: Double, val hit: Int, val speed: Double)
+        data class Row(val key: String, val acc: Double, val raw: Double, val hit: Int, val speed: Double)
+        val useFix = cbFix.isChecked
         val rows = r.outputs.map { (key, outs) ->
-            val (acc, hit) = scoreOf(outs.joinToString(""), ref)
-            Row(key, acc, hit, (r.decodeMs[key] ?: 0) / 1000.0 / r.audioSec)
+            val rawText = outs.joinToString("")
+            val (raw, rawHit) = scoreOf(rawText, ref)
+            val (acc, hit) = if (useFix) scoreOf(outs.joinToString("") { fixer.plainFix(it) }, ref) else (raw to rawHit)
+            Row(key, acc, raw, hit, (r.decodeMs[key] ?: 0) / 1000.0 / r.audioSec)
         }.sortedByDescending { it.acc }
         val sb = StringBuilder()
-        sb.append(String.format(Locale.KOREA, "녹음 비교 · %s · %.0f초 · 문장 %d개\n", name, r.audioSec, r.segStartMs.size))
-        sb.append("정확도   용어    처리시간  방식\n")
+        val nSpk = r.speakers.filter { it > 0 }.distinct().size
+        sb.append(String.format(Locale.KOREA, "녹음 비교 · %s · %.0f초 · 문장 %d개 · 화자 %s\n", name, r.audioSec, r.segStartMs.size, if (nSpk > 0) "${nSpk}명" else "구분 안 함"))
+        sb.append(if (useFix) "교정후   교정전   용어    처리시간  방식\n" else "정확도   용어    처리시간  방식\n")
         rows.forEach {
-            sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %5.2f배  %s\n", it.acc, it.hit, terms.size, it.speed, it.key))
+            if (useFix) sb.append(String.format(Locale.KOREA, "%5.1f%%  %5.1f%%  %2d/%d  %5.2f배  %s\n", it.acc, it.raw, it.hit, terms.size, it.speed, it.key))
+            else sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %5.2f배  %s\n", it.acc, it.hit, terms.size, it.speed, it.key))
         }
         sb.append("처리시간: 녹음 길이 대비 (1배 미만이면 실시간보다 빠름)")
         compareView.text = sb.toString()
@@ -473,7 +534,7 @@ class MainActivity : Activity(), TranscriberListener {
             // 문장을 누르면 모든 방식의 결과를 정확도 순으로 보여 줌
             val all = LinkedHashMap<String, String>()
             rows.forEach { row -> all[row.key] = r.outputs[row.key]?.getOrNull(i) ?: "" }
-            val fr = FinalResult(t, unsure?.getOrNull(i) ?: emptySet(), all, r.segStartMs[i], r.segStartMs[i], 0)
+            val fr = FinalResult(t, unsure?.getOrNull(i) ?: emptySet(), all, r.segStartMs[i], r.segStartMs[i], 0, r.speakers.getOrNull(i) ?: 0)
             lines += fr; lineOffsets += 0L
             linesBox.addView(lineView(fr, 0), lp(top = 6))
         }
@@ -585,29 +646,50 @@ class MainActivity : Activity(), TranscriberListener {
         }
     }
 
+    private fun speakerName(n: Int) = speakerNames[n] ?: "화자$n"
+
     private fun lineView(r: FinalResult, offset: Long): View {
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, dp(4)) }
+        val segs = if (cbFix.isChecked) fixer.fix(r.text) else listOf(TermFixer.Seg(r.text))
+        val changed = segs.any { it.orig != null }
         val main = TextView(this).apply {
             val sb = SpannableStringBuilder()
             val t = fmt(r.startMs + offset)
-            sb.append(t).append("   ")
+            sb.append(t).append("  ")
             sb.setSpan(ForegroundColorSpan(cMuted), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             sb.setSpan(RelativeSizeSpan(0.75f), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (r.speaker > 0) {
+                val nm = speakerName(r.speaker)
+                val s0 = sb.length
+                sb.append(nm).append("  ")
+                sb.setSpan(ForegroundColorSpan(speakerColors[(r.speaker - 1) % speakerColors.size]), s0, s0 + nm.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                sb.setSpan(RelativeSizeSpan(0.85f), s0, s0 + nm.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
             val base = sb.length
-            sb.append(r.text)
-            r.uncertain.forEach { i ->
+            segs.forEach { sg ->
+                val s0 = sb.length
+                sb.append(sg.text)
+                if (sg.orig != null) {
+                    sb.setSpan(UnderlineSpan(), s0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.setSpan(ForegroundColorSpan(cAccent), s0, sb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+            }
+            // 교정으로 글자 위치가 바뀌지 않았을 때만 불확실 글자 표시
+            if (!changed) r.uncertain.forEach { i ->
                 if (i in r.text.indices) sb.setSpan(BackgroundColorSpan(cDoubt), base + i, base + i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
             text = sb; textSize = 17f; setTextColor(cInk); setLineSpacing(0f, 1.25f)
         }
         col.addView(main)
-        if (r.hyps.size > 1) {
+        val fixes = segs.filter { it.orig != null }
+        if (r.hyps.size > 1 || fixes.isNotEmpty()) {
             val detail = TextView(this).apply {
                 val sb = SpannableStringBuilder()
-                r.hyps.forEach { (name, h) ->
-                    val s = sb.length
+                if (fixes.isNotEmpty()) sb.append("용어 교정  ").append(fixes.joinToString(", ") { "${it.orig} → ${it.text}" }).append('\n')
+                if (r.hyps.size > 1) r.hyps.forEach { (name, h) ->
+                    val s0 = sb.length
                     sb.append(name).append("  ")
-                    sb.setSpan(ForegroundColorSpan(cAccent), s, s + name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.setSpan(ForegroundColorSpan(cAccent), s0, s0 + name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     sb.append(h.ifBlank { "(결과 없음)" }).append('\n')
                 }
                 text = sb.trim(); textSize = 14f; setTextColor(cMuted); visibility = View.GONE
@@ -617,7 +699,34 @@ class MainActivity : Activity(), TranscriberListener {
             col.addView(detail, lp(top = 4))
             col.setOnClickListener { detail.visibility = if (detail.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
         }
+        if (r.speaker > 0) col.setOnLongClickListener { renameSpeaker(r.speaker); true }
         return col
+    }
+
+    private fun renameSpeaker(n: Int) {
+        val et = EditText(this).apply { setText(speakerName(n)); setSelectAllOnFocus(true) }
+        AlertDialog.Builder(this)
+            .setTitle("화자 이름 바꾸기")
+            .setView(et)
+            .setPositiveButton("바꾸기") { _, _ ->
+                val v = et.text.toString().trim()
+                if (v.isNotEmpty()) { speakerNames[n] = v; rerenderLog() }
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun rerenderLog() {
+        if (!::linesBox.isInitialized) return
+        linesBox.removeAllViews()
+        lines.forEachIndexed { i, r -> linesBox.addView(lineView(r, lineOffsets.getOrElse(i) { 0L }), lp(top = 6)) }
+    }
+
+    private val fixerRebuild = Runnable { rebuildFixer(); rerenderLog() }
+    private fun scheduleFixerRebuild() { ui.removeCallbacks(fixerRebuild); ui.postDelayed(fixerRebuild, 700) }
+    private fun rebuildFixer() {
+        if (!::etKeep.isInitialized) return
+        fixer = TermFixer(etTerms.text.toString(), etPairs.text.toString(), etKeep.text.toString())
     }
 
     private fun updateStats() {
@@ -645,8 +754,14 @@ class MainActivity : Activity(), TranscriberListener {
 
     // ---------------- 기록 다루기 ----------------
 
+    private fun shownText(r: FinalResult) = if (cbFix.isChecked) fixer.plainFix(r.text) else r.text
+
     private fun transcriptText(): String =
-        lines.indices.joinToString("\n") { i -> "[${fmt(lines[i].startMs + lineOffsets[i])}] ${lines[i].text}" }
+        lines.indices.joinToString("\n") { i ->
+            val r = lines[i]
+            val who = if (r.speaker > 0) " ${speakerName(r.speaker)}:" else ""
+            "[${fmt(r.startMs + lineOffsets[i])}]$who ${shownText(r)}"
+        }
 
     private fun share() {
         if (lines.isEmpty()) { statusView.text = "아직 공유할 기록이 없습니다"; return }
@@ -671,6 +786,7 @@ class MainActivity : Activity(), TranscriberListener {
     }
 
     private fun clearLogNow() {
+        speakerNames.clear()
         lines.clear(); lineOffsets.clear(); latencies.clear(); linesBox.removeAllViews(); interimView.text = ""
         compareView.visibility = View.GONE
         if (transcriber == null) { startedAt = 0L; clockView.text = "00:00:00" }
@@ -700,7 +816,8 @@ class MainActivity : Activity(), TranscriberListener {
             val (acc, hit) = scoreOf(text, ref)
             sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %s\n", acc, hit, terms.size, name))
         }
-        row("최종 결과", lines.joinToString("") { it.text })
+        row("최종 결과" + if (cbFix.isChecked) " (용어 교정 후)" else "", lines.joinToString("") { shownText(it) })
+        if (cbFix.isChecked) row("최종 결과 (교정 전)", lines.joinToString("") { it.text })
         val names = LinkedHashSet<String>()
         lines.forEach { names.addAll(it.hyps.keys) }
         names.forEach { name -> row(name, lines.joinToString("") { it.hyps[name] ?: "" }) }

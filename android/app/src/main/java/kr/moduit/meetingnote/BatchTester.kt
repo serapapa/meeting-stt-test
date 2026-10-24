@@ -10,6 +10,8 @@ class BatchResult(
     val decodeMs: LinkedHashMap<String, Long>,
     /** 합치기 방식의 문장별 불확실 글자 위치 */
     val uncertain: Map<String, List<Set<Int>>>,
+    /** 문장별 화자 번호 (화자 구분 모델이 없으면 모두 0) */
+    val speakers: List<Int>,
 )
 
 /**
@@ -20,6 +22,7 @@ class BatchResult(
 class BatchTester(
     private val models: ModelManager,
     private val wav: File,
+    private val speakerThreshold: Float,
     private val progress: (String) -> Unit,
 ) {
     @Volatile var cancelled = false
@@ -35,6 +38,13 @@ class BatchTester(
         } finally { r.close(); seg.flush(); seg.release() }
         if (segs.isEmpty()) throw Exception("녹음에서 말소리를 찾지 못했습니다")
         val audioSec = r.totalSamples / 16000.0
+
+        // 화자 구분 (모델이 있으면)
+        val speakers = if (models.isReady(Models.SPEAKER)) {
+            progress("화자 구분 중…")
+            val tr = SpeakerTracker(models.onnx(Models.SPEAKER), speakerThreshold)
+            try { segs.map { tr.assign(it.second) } } finally { tr.release() }
+        } else segs.map { 0 }
 
         // 2) 잡음 제거 버전 만들기 (모델이 있으면)
         val variants = linkedMapOf("" to segs.map { it.second })
@@ -83,6 +93,6 @@ class BatchTester(
             decodeMs[key] = maxOf(decodeMs[lk] ?: 0, decodeMs[sk] ?: 0, decodeMs[vk] ?: 0)
         }
 
-        return BatchResult(segs.map { it.first * 1000 / 16000 }, audioSec, outputs, decodeMs, uncertain)
+        return BatchResult(segs.map { it.first * 1000 / 16000 }, audioSec, outputs, decodeMs, uncertain, speakers)
     }
 }
