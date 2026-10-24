@@ -71,6 +71,9 @@ class MainActivity : Activity(), TranscriberListener {
     private lateinit var spRecs: Spinner
     private lateinit var btnRerun: Button
     private lateinit var btnRecDelete: Button
+    private lateinit var btnBatch: Button
+    private lateinit var btnAllModels: Button
+    private var batch: BatchTester? = null
     private lateinit var linesBox: LinearLayout
     private lateinit var interimView: TextView
     private lateinit var logScroll: ScrollView
@@ -160,11 +163,10 @@ class MainActivity : Activity(), TranscriberListener {
     // ---------------- 화면 ----------------
 
     private fun buildUi(): View {
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(cBg)
-            setPadding(dp(16), dp(16), dp(16), dp(12))
-        }
+        val wide = resources.configuration.screenWidthDp >= 720
+
+        // ===== 오른쪽(결과) 영역 =====
+        val right = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
@@ -176,23 +178,53 @@ class MainActivity : Activity(), TranscriberListener {
         head.addView(clockView)
         btnMain = button("받아쓰기 시작", true) { onMainClick() }
         head.addView(btnMain, LinearLayout.LayoutParams(WRAP_CONTENT, dp(48)))
-        root.addView(head)
+        right.addView(head)
 
         levelBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 0 }
-        root.addView(levelBar, lp(top = 6).apply { height = dp(6) })
+        right.addView(levelBar, lp(top = 6).apply { height = dp(6) })
 
-        val topScroll = ScrollView(this)
-        val topCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        topScroll.addView(topCol)
+        // 결과 (원고 비교·일괄 비교)
+        compareView = label("", 14f, cInk).apply {
+            visibility = View.GONE; setPadding(dp(14), dp(10), dp(14), dp(10))
+            typeface = Typeface.MONOSPACE
+            background = GradientDrawable().apply { setColor(cAccentSoft); cornerRadius = dp(12).toFloat() }
+        }
+        right.addView(compareView, lp(top = 10))
 
-        // 설정 (모델 목록이 설정에 따라 바뀌므로 먼저 만든다)
+        val logCard = card()
+        val logHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        logHead.addView(label("받아쓰기 기록 · 문장을 누르면 모델별 결과", 12f, cMuted, true), lp(0, WRAP_CONTENT, 1f))
+        statsView = label("", 12f)
+        logHead.addView(statsView)
+        logCard.addView(logHead)
+        logScroll = ScrollView(this)
+        val logCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        linesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        logCol.addView(linesBox)
+        interimView = label("", 17f, cMuted)
+        logCol.addView(interimView, lp(top = 6))
+        logScroll.addView(logCol)
+        logCard.addView(logScroll, lp(MATCH_PARENT, 0, 1f, top = 6))
+        right.addView(logCard, lp(MATCH_PARENT, 0, 1f, top = 10))
+
+        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        bottom.addView(button("기록 공유·저장") { share() }, lp(0, dp(48), 1f))
+        btnClear = button("기록 지우기") { clearLog() }
+        bottom.addView(btnClear, lp(0, dp(48), 1f).apply { leftMargin = dp(8) })
+        right.addView(bottom, lp(top = 10))
+
+        // ===== 왼쪽(설정) 영역 =====
+        val leftScroll = ScrollView(this)
+        val left = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        leftScroll.addView(left)
+
         val setCard = card()
         setCard.addView(label("설정 (다음 시작부터 적용)", 12f, cMuted, true))
         setCard.addView(label("확정 인식 방식", 13f), lp(top = 6))
         spMode = spinner(FinalMode.values().map { it.label }, "mode2", 0) { refreshModels() }
         setCard.addView(spMode)
         setCard.addView(label("위스퍼 크기", 13f), lp(top = 6))
-        spWhisper = spinner(listOf("작은 것 (빠름)", "큰 것 (정확, 느림·용량 큼)"), "whisper", 0) { refreshModels() }
+        spWhisper = spinner(listOf("작은 것 (빠름)", "큰 것 (정확, 느림)"), "whisper", 0) { refreshModels() }
         setCard.addView(spWhisper)
         setCard.addView(label("잡음 제거", 13f), lp(top = 6))
         spDenoise = spinner(listOf("끔", "켬 (확정 인식 전에 잡음을 걷어 냄)"), "denoise", 0) { refreshModels() }
@@ -205,38 +237,35 @@ class MainActivity : Activity(), TranscriberListener {
         setCard.addView(spGain)
         setCard.addView(label("위 막대가 말할 때 절반쯤 차면 적당합니다.", 12f), lp(top = 4))
 
-        // 모델
         val modelCard = card()
-        modelCard.addView(label("음성 모델", 12f, cMuted, true))
+        modelCard.addView(label("음성 모델 (지금 설정에 필요한 것)", 12f, cMuted, true))
         modelStatus = label("", 14f, cInk)
         modelCard.addView(modelStatus, lp(top = 4))
-        btnDownload = button("필요한 모델 내려받기 (와이파이 권장)") { downloadNeeded() }
+        btnDownload = button("필요한 모델 내려받기 (와이파이 권장)") { downloadNeeded(neededModels()) }
         modelCard.addView(btnDownload, lp(top = 8).apply { height = dp(44) })
 
-        topCol.addView(modelCard, lp(top = 12))
-        topCol.addView(setCard, lp(top = 12))
-
-        // 녹음
         val recCard = card()
-        recCard.addView(label("녹음", 12f, cMuted, true))
+        recCard.addView(label("녹음으로 비교하기", 12f, cMuted, true))
         cbRecord = CheckBox(this).apply {
             text = "받아쓰는 동안 녹음 파일도 남기기"; setTextColor(cInk); textSize = 14f
             isChecked = prefs.getBoolean("record", true)
             setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("record", v).apply() }
         }
         recCard.addView(cbRecord, lp(top = 4))
-        recCard.addView(label("남긴 녹음을 지금 설정으로 다시 인식해, 같은 소리로 설정끼리 비교할 수 있습니다.", 12f), lp(top = 2))
         spRecs = Spinner(this)
         recCard.addView(spRecs, lp(top = 6))
+        btnBatch = button("이 녹음으로 모든 방식 비교", true) { runBatch() }
+        recCard.addView(btnBatch, lp(top = 6).apply { height = dp(48) })
+        recCard.addView(label("내려받은 모든 모델로 각각 인식하고, 잡음 제거 켬·끔과 세 모델 합치기까지 한 번에 비교합니다. 결과는 오른쪽 위에 표로 나옵니다.", 12f), lp(top = 4))
+        btnAllModels = button("비교용 모델 모두 내려받기 (약 1.9GB)") { downloadNeeded(allCompareModels()) }
+        recCard.addView(btnAllModels, lp(top = 6).apply { height = dp(44) })
         val recBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btnRerun = button("선택한 녹음 다시 인식") { rerun() }
+        btnRerun = button("지금 설정으로 다시 인식") { rerun() }
         recBtns.addView(btnRerun, lp(0, dp(44), 1f))
-        btnRecDelete = button("선택한 녹음 지우기") { deleteRecording() }
+        btnRecDelete = button("녹음 지우기") { deleteRecording() }
         recBtns.addView(btnRecDelete, lp(0, dp(44), 1f).apply { leftMargin = dp(8) })
         recCard.addView(recBtns, lp(top = 6))
-        topCol.addView(recCard, lp(top = 12))
 
-        // 원고
         val scCard = card()
         val scHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         scHead.addView(label("시험용 원고 · 두 사람 대화", 12f, cAccent, true), lp(0, WRAP_CONTENT, 1f))
@@ -256,39 +285,28 @@ class MainActivity : Activity(), TranscriberListener {
             }
             scriptBox.addView(t, lp(top = 8))
         }
-        scriptBox.addView(button("원고와 비교하기") { compare() }, lp(top = 10).apply { height = dp(44) })
-        compareView = label("", 14f, cInk).apply {
-            visibility = View.GONE; setPadding(dp(12), dp(10), dp(12), dp(10))
-            background = GradientDrawable().apply { setColor(cAccentSoft); cornerRadius = dp(10).toFloat() }
-        }
-        scriptBox.addView(compareView, lp(top = 8))
+        scriptBox.addView(button("받아쓴 기록을 원고와 비교하기") { compare() }, lp(top = 10).apply { height = dp(44) })
         scCard.addView(scriptBox)
-        topCol.addView(scCard, lp(top = 12))
 
-        root.addView(topScroll, lp(MATCH_PARENT, 0, 0.42f))
+        left.addView(scCard)
+        left.addView(recCard, lp(top = 12))
+        left.addView(setCard, lp(top = 12))
+        left.addView(modelCard, lp(top = 12))
 
-        // 기록
-        val logCard = card()
-        val logHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        logHead.addView(label("받아쓰기 기록 · 문장을 누르면 모델별 결과", 12f, cMuted, true), lp(0, WRAP_CONTENT, 1f))
-        statsView = label("", 12f)
-        logHead.addView(statsView)
-        logCard.addView(logHead)
-        logScroll = ScrollView(this)
-        val logCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        linesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        logCol.addView(linesBox)
-        interimView = label("", 17f, cMuted)
-        logCol.addView(interimView, lp(top = 6))
-        logScroll.addView(logCol)
-        logCard.addView(logScroll, lp(MATCH_PARENT, 0, 1f, top = 6))
-        root.addView(logCard, lp(MATCH_PARENT, 0, 0.58f, top = 12))
-
-        val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        bottom.addView(button("기록 공유·저장") { share() }, lp(0, dp(48), 1f))
-        btnClear = button("기록 지우기") { clearLog() }
-        bottom.addView(btnClear, lp(0, dp(48), 1f).apply { leftMargin = dp(8) })
-        root.addView(bottom, lp(top = 10))
+        // ===== 배치 =====
+        val root = LinearLayout(this).apply {
+            setBackgroundColor(cBg)
+            setPadding(dp(16), dp(16), dp(16), dp(12))
+        }
+        if (wide) {
+            root.orientation = LinearLayout.HORIZONTAL
+            root.addView(leftScroll, LinearLayout.LayoutParams(0, MATCH_PARENT, 0.38f))
+            root.addView(right, LinearLayout.LayoutParams(0, MATCH_PARENT, 0.62f).apply { leftMargin = dp(16) })
+        } else {
+            root.orientation = LinearLayout.VERTICAL
+            root.addView(right, lp(MATCH_PARENT, 0, 0.6f))
+            root.addView(leftScroll, lp(MATCH_PARENT, 0, 0.4f, top = 12))
+        }
         return root
     }
 
@@ -318,7 +336,7 @@ class MainActivity : Activity(), TranscriberListener {
     private fun neededModels(): List<ModelSpec> = Engines.needed(options())
 
     private fun refreshModels() {
-        if (!::spMic.isInitialized || !::modelStatus.isInitialized) return
+        if (!::spMic.isInitialized || !::modelStatus.isInitialized || !::btnAllModels.isInitialized) return
         val sb = StringBuilder()
         neededModels().forEach { m ->
             val ready = models.isReady(m)
@@ -329,16 +347,22 @@ class MainActivity : Activity(), TranscriberListener {
         val missing = neededModels().count { !models.isReady(it) }
         btnDownload.visibility = if (missing > 0 || downloading) View.VISIBLE else View.GONE
         btnDownload.isEnabled = !downloading
-        if (transcriber == null && !downloading) {
+        val allMissing = allCompareModels().count { !models.isReady(it) }
+        btnAllModels.visibility = if (allMissing > 0) View.VISIBLE else View.GONE
+        btnAllModels.isEnabled = !downloading
+        if (transcriber == null && !downloading && batch == null) {
             statusView.text = if (missing > 0) "모델 ${missing}개를 먼저 내려받아 주세요" else "준비됨"
         }
     }
 
-    private fun downloadNeeded() {
+    private fun allCompareModels() = listOf(Models.VAD, Models.SENSE_VOICE, Models.OFFLINE_KO, Models.WHISPER_SMALL, Models.WHISPER_TURBO, Models.DENOISE)
+
+    private fun downloadNeeded(list: List<ModelSpec>) {
         if (downloading) return
+        val todo = list.filter { !models.isReady(it) }
+        if (todo.isEmpty()) { statusView.text = "이미 모두 내려받았습니다"; return }
         downloading = true
         refreshModels()
-        val todo = neededModels().filter { !models.isReady(it) }
         Thread {
             try {
                 todo.forEachIndexed { i, m ->
@@ -363,14 +387,16 @@ class MainActivity : Activity(), TranscriberListener {
             "${it.nameWithoutExtension}  (${sec / 60}분 ${sec % 60}초)"
         }
         spRecs.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, names)
-        btnRerun.isEnabled = recFiles.isNotEmpty()
-        btnRecDelete.isEnabled = recFiles.isNotEmpty()
+        val idle = transcriber == null && batch == null
+        btnRerun.isEnabled = recFiles.isNotEmpty() && idle
+        btnRecDelete.isEnabled = recFiles.isNotEmpty() && idle
+        btnBatch.isEnabled = recFiles.isNotEmpty() && idle
     }
 
     private fun selectedRecording(): File? = recFiles.getOrNull(spRecs.selectedItemPosition)
 
     private fun rerun() {
-        if (transcriber != null) return
+        if (transcriber != null || batch != null) return
         val f = selectedRecording() ?: return
         val missing = neededModels().filter { !models.isReady(it) && it != Models.STREAM_KO }
         if (missing.isNotEmpty()) { statusView.text = "모델을 먼저 내려받아 주세요"; return }
@@ -388,18 +414,75 @@ class MainActivity : Activity(), TranscriberListener {
         if (!recDeleteArmed) {
             recDeleteArmed = true
             btnRecDelete.text = "한 번 더 누르면 지웁니다"; btnRecDelete.setTextColor(cRec)
-            ui.postDelayed({ recDeleteArmed = false; btnRecDelete.text = "선택한 녹음 지우기"; btnRecDelete.setTextColor(cInk) }, 3000)
+            ui.postDelayed({ recDeleteArmed = false; btnRecDelete.text = "녹음 지우기"; btnRecDelete.setTextColor(cInk) }, 3000)
             return
         }
         recDeleteArmed = false
-        btnRecDelete.text = "선택한 녹음 지우기"; btnRecDelete.setTextColor(cInk)
+        btnRecDelete.text = "녹음 지우기"; btnRecDelete.setTextColor(cInk)
         f.delete()
         refreshRecordings()
+    }
+
+    // ---------------- 녹음 하나로 모든 방식 비교 ----------------
+
+    private fun runBatch() {
+        if (transcriber != null || batch != null) return
+        val f = selectedRecording() ?: return
+        if (!models.isReady(Models.VAD)) { statusView.text = "말소리 구간 감지 모델을 먼저 내려받아 주세요"; return }
+        clearLogNow()
+        compareView.visibility = View.GONE
+        val b = BatchTester(models, f) { msg -> ui.post { statusView.text = msg } }
+        batch = b
+        setBusyUi(true, "비교하는 중…")
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        Thread {
+            val res = try { Result.success(b.run()) } catch (t: Throwable) { Result.failure(t) }
+            ui.post {
+                batch = null
+                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                setBusyUi(false, null)
+                res.onSuccess { showBatch(it, f.nameWithoutExtension) }
+                res.onFailure { statusView.text = "비교 실패: ${it.message}" }
+            }
+        }.start()
+    }
+
+    private fun showBatch(r: BatchResult, name: String) {
+        val ref = plain(script.joinToString("") { it.second })
+        data class Row(val key: String, val acc: Double, val hit: Int, val speed: Double)
+        val rows = r.outputs.map { (key, outs) ->
+            val (acc, hit) = scoreOf(outs.joinToString(""), ref)
+            Row(key, acc, hit, (r.decodeMs[key] ?: 0) / 1000.0 / r.audioSec)
+        }.sortedByDescending { it.acc }
+        val sb = StringBuilder()
+        sb.append(String.format(Locale.KOREA, "녹음 비교 · %s · %.0f초 · 문장 %d개\n", name, r.audioSec, r.segStartMs.size))
+        sb.append("정확도   용어    처리시간  방식\n")
+        rows.forEach {
+            sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %5.2f배  %s\n", it.acc, it.hit, terms.size, it.speed, it.key))
+        }
+        sb.append("처리시간: 녹음 길이 대비 (1배 미만이면 실시간보다 빠름)")
+        compareView.text = sb.toString()
+        compareView.visibility = View.VISIBLE
+
+        // 가장 좋은 방식의 문장들을 기록에 보여 줌
+        val best = rows.firstOrNull() ?: return
+        val outs = r.outputs[best.key] ?: return
+        val unsure = r.uncertain[best.key]
+        val mem = r.members[best.key]
+        outs.forEachIndexed { i, t ->
+            if (t.isBlank()) return@forEachIndexed
+            val fr = FinalResult(t, unsure?.getOrNull(i) ?: emptySet(), mem?.getOrNull(i) ?: emptyMap(), r.segStartMs[i], r.segStartMs[i], 0)
+            lines += fr; lineOffsets += 0L
+            linesBox.addView(lineView(fr, 0), lp(top = 6))
+        }
+        statsView.text = "가장 정확한 방식: ${best.key}"
+        statusView.text = "비교 끝"
     }
 
     // ---------------- 받아쓰기 ----------------
 
     private fun onMainClick() {
+        if (batch != null) return
         val t = transcriber
         if (t != null) { if (!rerunning) { t.stop(); btnMain.isEnabled = false; btnMain.text = "정리하는 중…" }; return }
         val missing = neededModels().filter { !models.isReady(it) }
@@ -441,6 +524,7 @@ class MainActivity : Activity(), TranscriberListener {
                 (btnMain.background as GradientDrawable).setColor(cRec)
             }
             btnRerun.isEnabled = false; btnDownload.isEnabled = false
+            btnBatch.isEnabled = false; btnAllModels.isEnabled = false; btnRecDelete.isEnabled = false
         } else {
             btnMain.isEnabled = true
             btnMain.text = if (lines.isEmpty()) "받아쓰기 시작" else "받아쓰기 다시 시작"
@@ -596,27 +680,30 @@ class MainActivity : Activity(), TranscriberListener {
 
     private fun plain(s: String) = s.replace(Regex("[\\s.,!?·~…\"'“”‘’()\\-:;]"), "")
 
+    private val terms = listOf("EAMS", "주간보고", "기업은행", "화면설계서", "깃허브", "노션", "단위테스트", "요구사항", "전진영", "모두잇", "제안서", "클로드", "구글드라이브", "아카이브", "심지훈", "사티스")
+
+    /** (글자 정확도 %, 잡힌 용어 수) */
+    private fun scoreOf(text: String, ref: String): Pair<Double, Int> {
+        val h = plain(text)
+        if (h.isEmpty()) return 0.0 to 0
+        val d = Combiner.distance(ref, h)
+        return maxOf(0.0, 1.0 - d.toDouble() / ref.length) * 100 to terms.count { h.contains(it) }
+    }
+
     private fun compare() {
         val ref = plain(script.joinToString("") { it.second })
         compareView.visibility = View.VISIBLE
         if (lines.isEmpty()) { compareView.text = "아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요."; return }
-        val terms = listOf("EAMS", "주간보고", "기업은행", "화면설계서", "깃허브", "노션", "단위테스트", "요구사항", "전진영", "모두잇", "제안서", "클로드", "구글드라이브", "아카이브", "심지훈", "사티스")
-        fun score(text: String): String {
-            val h = plain(text)
-            if (h.isEmpty()) return "결과 없음"
-            val d = Combiner.distance(ref, h)
-            val acc = maxOf(0.0, 1.0 - d.toDouble() / ref.length) * 100
-            val hit = terms.count { h.contains(it) }
-            return String.format(Locale.KOREA, "%.1f%%  (용어 %d/%d)", acc, hit, terms.size)
+        val sb = StringBuilder("원고 비교\n정확도   용어    방식\n")
+        fun row(name: String, text: String) {
+            val (acc, hit) = scoreOf(text, ref)
+            sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %s\n", acc, hit, terms.size, name))
         }
-        val sb = StringBuilder()
-        sb.append("합친 결과  ").append(score(lines.joinToString("") { it.text })).append('\n')
+        row("최종 결과", lines.joinToString("") { it.text })
         Engines.ORDER.forEach { name ->
-            if (lines.any { it.hyps.containsKey(name) }) {
-                sb.append(name).append("  ").append(score(lines.joinToString("") { it.hyps[name] ?: "" })).append('\n')
-            }
+            if (lines.any { it.hyps.containsKey(name) }) row(name, lines.joinToString("") { it.hyps[name] ?: "" })
         }
-        sb.append("글자 정확도 기준 · 대략 95% 이상이면 회의록으로 쓸 만합니다")
+        sb.append("대략 95% 이상이면 회의록으로 쓸 만합니다")
         compareView.text = sb.toString()
     }
 }

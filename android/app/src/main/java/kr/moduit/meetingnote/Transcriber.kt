@@ -5,24 +5,13 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import com.k2fsa.sherpa.onnx.FeatureConfig
-import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
-import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
-import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiser
-import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserConfig
-import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserGtcrnModelConfig
-import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserModelConfig
-import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
-import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OnlineStream
 import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
-import com.k2fsa.sherpa.onnx.SileroVadModelConfig
-import com.k2fsa.sherpa.onnx.Vad
-import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
@@ -115,7 +104,7 @@ class Transcriber(
 
     private var online: OnlineRecognizer? = null
     private var stream: OnlineStream? = null
-    private var vad: Vad? = null
+    private var segmenter: Segmenter? = null
     private var denoiser: OfflineSpeechDenoiser? = null
     private val engines = linkedMapOf<String, OfflineRecognizer>()
 
@@ -140,7 +129,7 @@ class Transcriber(
             segWorker.awaitTermination(120, TimeUnit.SECONDS)
             pool.shutdown()
             listOf<() -> Unit>(
-                { stream?.release() }, { online?.release() }, { vad?.release() }, { denoiser?.release() },
+                { stream?.release() }, { online?.release() }, { segmenter?.release() }, { denoiser?.release() },
             ).forEach { try { it() } catch (_: Throwable) {} }
             engines.values.forEach { try { it.release() } catch (_: Throwable) {} }
             listener.onInterim("")
@@ -174,149 +163,18 @@ class Transcriber(
             stream = online!!.createStream()
         }
 
-        vad = Vad(
-            null,
-            VadModelConfig(
-                sileroVadModelConfig = SileroVadModelConfig(
-                    model = models.onnx(Models.VAD),
-                    threshold = 0.5f, minSilenceDuration = 0.3f, minSpeechDuration = 0.2f,
-                    windowSize = 512, maxSpeechDuration = 20f,
-                ),
-                sampleRate = sr, numThreads = 1,
-            ),
-        )
+        segmenter = Segmenter(models.onnx(Models.VAD)) { samples, start -> emit(samples, start) }
+        if (opt.denoise) denoiser = Recognizers.denoiser(models)
 
-        if (opt.denoise) {
-            denoiser = OfflineSpeechDenoiser(
-                null,
-                OfflineSpeechDenoiserConfig(
-                    model = OfflineSpeechDenoiserModelConfig(
-                        gtcrn = OfflineSpeechDenoiserGtcrnModelConfig(model = models.onnx(Models.DENOISE)),
-                        numThreads = 1,
-                    ),
-                ),
-            )
-        }
-
-        val useWhisper = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.WHISPER
-        val useSv = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.SENSE_VOICE
-        val useKo = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.OFFLINE_KO
         val th = if (opt.mode == FinalMode.ENSEMBLE) 2 else 4
-
-        if (useWhisper) {
-            val w = opt.whisper
-            engines[Engines.WHISPER] = OfflineRecognizer(
-                null,
-                OfflineRecognizerConfig(
-                    featConfig = feat,
-                    modelConfig = OfflineModelConfig(
-                        whisper = OfflineWhisperModelConfig(
-                            encoder = models.find(w, "encoder", true),
-                            decoder = models.find(w, "decoder", true),
-                            language = "ko", task = "transcribe",
-                        ),
-                        tokens = models.tokens(w), numThreads = th, modelType = "whisper",
-                    ),
-                ),
-            )
-        }
-        if (useSv) {
-            val sv = Models.SENSE_VOICE
-            engines[Engines.SENSE_VOICE] = OfflineRecognizer(
-                null,
-                OfflineRecognizerConfig(
-                    featConfig = feat,
-                    modelConfig = OfflineModelConfig(
-                        senseVoice = OfflineSenseVoiceModelConfig(
-                            model = models.find(sv, "model", true), language = "ko", useInverseTextNormalization = true,
-                        ),
-                        tokens = models.tokens(sv), numThreads = th,
-                    ),
-                ),
-            )
-        }
-        if (useKo) {
-            val ko = Models.OFFLINE_KO
-            engines[Engines.OFFLINE_KO] = OfflineRecognizer(
-                null,
-                OfflineRecognizerConfig(
-                    featConfig = feat,
-                    modelConfig = OfflineModelConfig(
-                        transducer = OfflineTransducerModelConfig(
-                            encoder = models.find(ko, "encoder", true),
-                            decoder = models.find(ko, "decoder", false),
-                            joiner = models.find(ko, "joiner", true),
-                        ),
-                        tokens = models.tokens(ko), numThreads = th, modelType = "transducer",
-                    ),
-                ),
-            )
-        }
+        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.WHISPER) engines[Engines.WHISPER] = Recognizers.create(models, opt.whisper, th)
+        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.SENSE_VOICE) engines[Engines.SENSE_VOICE] = Recognizers.create(models, Models.SENSE_VOICE, th)
+        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.OFFLINE_KO) engines[Engines.OFFLINE_KO] = Recognizers.create(models, Models.OFFLINE_KO, th)
     }
 
-    // ---------------- 문장 나누기 ----------------
-    // 말소리 감지 결과를 보고 직접 자른다: 0.6초 이상 조용하면 끊고, 12초가 넘으면 강제로 끊는다.
-
-    private val win = 512
-    private val preRollMax = (sr * 0.4).toInt()
-    private val silenceEnd = (sr * 0.6).toInt()
-    private val maxSeg = sr * 12
-    private var preRoll = FloatArray(0)
-    private var seg = FloatArray(0)
-    private var segStart = 0L
-    private var speaking = false
-    private var silenceRun = 0
-    private var pos = 0L          // 지금까지 처리한 샘플 수
-    private var winBuf = FloatArray(0)
     private var lastInterim = ""
 
-    private fun feed(samples: FloatArray) {
-        winBuf += samples
-        var off = 0
-        while (winBuf.size - off >= win) {
-            val w = winBuf.copyOfRange(off, off + win)
-            off += win
-            vad!!.acceptWaveform(w)
-            val speech = vad!!.isSpeechDetected()
-            vad!!.clear()
-            step(w, speech)
-            pos += win
-        }
-        if (off > 0) winBuf = winBuf.copyOfRange(off, winBuf.size)
-    }
-
-    private fun step(w: FloatArray, speech: Boolean) {
-        if (!speaking) {
-            if (speech) {
-                speaking = true
-                seg = preRoll + w
-                segStart = max(0L, pos - preRoll.size)
-                silenceRun = 0
-            } else {
-                preRoll = (preRoll + w).let { if (it.size > preRollMax) it.copyOfRange(it.size - preRollMax, it.size) else it }
-            }
-            return
-        }
-        seg += w
-        silenceRun = if (speech) 0 else silenceRun + w.size
-        if (silenceRun >= silenceEnd) {
-            emit(seg.copyOfRange(0, max(0, seg.size - silenceRun + sr / 5)))
-            speaking = false
-            preRoll = FloatArray(0)
-        } else if (seg.size >= maxSeg) {
-            emit(seg)
-            seg = FloatArray(0)
-            segStart = pos + win
-        }
-    }
-
-    private fun flushSegment() {
-        if (speaking && seg.size > sr / 4) emit(seg)
-        speaking = false
-        seg = FloatArray(0)
-    }
-
-    private fun emit(samples: FloatArray) {
+    private fun emit(samples: FloatArray, segStart: Long) {
         val startMs = segStart * 1000 / sr
         val endMs = startMs + samples.size * 1000L / sr
         val snapshot = lastInterim
@@ -334,20 +192,8 @@ class Transcriber(
                 if (snapshot.isNotBlank()) listener.onFinal(FinalResult(snapshot, emptySet(), emptyMap(), startMs, endMs, 0))
                 return
             }
-            val clean = denoiser?.let { d ->
-                val r = d.run(samples, sr)
-                if (r.sampleRate == sr) r.samples else samples
-            } ?: samples
-            val futures = engines.map { (name, rec) ->
-                name to pool.submit(Callable {
-                    val s = rec.createStream()
-                    s.acceptWaveform(clean, sr)
-                    rec.decode(s)
-                    val t = rec.getResult(s).text.trim()
-                    s.release()
-                    t
-                })
-            }
+            val clean = denoiser?.let { Recognizers.denoise(it, samples) } ?: samples
+            val futures = engines.map { (name, rec) -> name to pool.submit(Callable { Recognizers.decode(rec, clean) }) }
             val hyps = linkedMapOf<String, String>()
             futures.forEach { (name, f) -> hyps[name] = try { f.get(120, TimeUnit.SECONDS) } catch (t: Throwable) { "" } }
             val ordered = Engines.ORDER.mapNotNull { hyps[it] }
@@ -398,13 +244,13 @@ class Transcriber(
                 val interim = on.getResult(st).text.trim()
                 if (interim != lastInterim) { lastInterim = interim; listener.onInterim(interim) }
 
-                feed(samples)
+                segmenter!!.feed(samples)
             }
         } finally {
             try { ar.stop() } catch (_: Throwable) {}
             ar.release()
             try { writer?.close() } catch (_: Throwable) {}
-            flushSegment()
+            segmenter?.flush()
             listener.onStatus("정리하는 중…")
         }
     }
@@ -417,14 +263,14 @@ class Transcriber(
         try {
             while (running) {
                 val samples = r.read(sr / 10) ?: break
-                feed(samples)
+                segmenter!!.feed(samples)
                 done += samples.size
                 val pct = if (r.totalSamples > 0) (done * 100 / r.totalSamples).toInt() else 0
                 if (pct != lastPct) { lastPct = pct; listener.onProgress(pct) }
             }
         } finally {
             r.close()
-            flushSegment()
+            segmenter?.flush()
         }
     }
 }

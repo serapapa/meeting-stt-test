@@ -57,7 +57,9 @@ jobs:
 
       - name: APK 만들기
         working-directory: android
-        run: gradle assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleRelease --no-daemon 2>&1 | tee ../build.log
 
       - name: APK 이름 정리
         run: cp android/app/build/outputs/apk/release/app-release.apk meeting-note.apk && ls -lh meeting-note.apk
@@ -70,3 +72,13 @@ jobs:
           body_path: notes.md
           files: meeting-note.apk
           make_latest: true
+
+      - name: 빌드 실패 기록 남기기
+        if: failure()
+        run: |
+          grep -E "^e: |error:|FAILURE|What went wrong" -A3 build.log | head -80 > fail.md || true
+          echo "" >> fail.md
+          tail -40 build.log >> fail.md
+          gh release create "fail-${{ github.run_number }}" --prerelease --title "빌드 실패 ${{ github.run_number }}" --notes-file fail.md
+        env:
+          GH_TOKEN: ${{ github.token }}
