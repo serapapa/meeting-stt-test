@@ -169,7 +169,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
 
   let rec = null, running = false, startedAt = 0, tickTimer = null;
   let lines = [], restarts = 0, gapTotal = 0, gapMax = 0, gapStart = 0;
-  let confSum = 0, confCount = 0, interimEl = null, wakeLock = null;
+  let confSum = 0, confCount = 0, interimEl = null, wakeLock = null, pendingInterim = '';
 
   function notice(text, kind){
     const n = $('notice');
@@ -303,12 +303,16 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     r.interimResults = true;
     r.maxAlternatives = 1;
 
+    // 끊긴 시간은 마이크가 실제로 소리를 다시 받기 시작한 순간까지 잰다
+    function closeGap(){
+      if(!gapStart) return;
+      const g = Date.now() - gapStart;
+      gapTotal += g; gapMax = Math.max(gapMax, g); addGap(g); gapStart = 0; updateStats();
+    }
+    r.onaudiostart = () => { closeGap(); setStatus('live', '받아쓰는 중'); };
     r.onstart = () => {
-      if(gapStart){
-        const g = Date.now() - gapStart;
-        gapTotal += g; gapMax = Math.max(gapMax, g); addGap(g); gapStart = 0; updateStats();
-      }
-      setStatus('live', '받아쓰는 중');
+      setStatus('live', '마이크 연결 중');
+      setTimeout(closeGap, 1500); // 소리 시작 신호를 주지 않는 브라우저 대비
     };
     r.onresult = e => {
       let interim = '';
@@ -317,6 +321,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
         if(res.isFinal) addLine(res[0].transcript, res[0].confidence);
         else interim += res[0].transcript;
       }
+      pendingInterim = interim.trim();
       ensureInterim();
       if(interim.trim()){
         interimEl.hidden = false;
@@ -339,6 +344,8 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
       // no-speech, aborted 는 다시 연결로 처리
     };
     r.onend = () => {
+      // 확정되지 못한 채 끝난 인식 중 문장은 버리지 않고 저장
+      if(pendingInterim){ addLine(pendingInterim, 0); pendingInterim = ''; }
       if(interimEl) interimEl.hidden = true;
       if(!running){ setStatus('', '멈춤'); return; }
       restarts++; gapStart = Date.now(); updateStats();
