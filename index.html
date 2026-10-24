@@ -232,7 +232,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     const x = document.createElement('div'); x.className = 'x';
     if(l.gap) x.textContent = '인식이 ' + (l.gap/1000).toFixed(1) + '초 동안 끊겼다가 다시 연결됨';
     else x.innerHTML = highlight(l.text);
-    row.append(t, x); return row;
+    row.append(t, x); l.el = row; return row;
   }
 
   function ensureInterim(){
@@ -253,7 +253,21 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   function addLine(text, conf){
     text = text.trim(); if(!text) return;
     empty.hidden = true;
-    const l = { at: elapsed(), text };
+    // 안드로이드 크롬은 말하는 동안 점점 길어지는 문장을 매번 '확정'으로 보냄
+    // → 직전 줄과 같은 말이 이어진 것이면 새 줄 대신 직전 줄을 덮어씀
+    const last = lines[lines.length - 1];
+    if(last && !last.gap && elapsed() - last.upd < 10000){
+      const a = last.text.replace(/\s/g,''), b = text.replace(/\s/g,'');
+      if(b === a || a.startsWith(b)){ last.upd = elapsed(); return; }
+      if(b.startsWith(a)){
+        last.text = text; last.upd = elapsed();
+        last.el.querySelector('.x').innerHTML = highlight(text);
+        if(conf > 0){ last.conf = conf; }
+        updateStats(); renderChips(); scrollDown();
+        return;
+      }
+    }
+    const l = { at: elapsed(), upd: elapsed(), text };
     lines.push(l);
     log.insertBefore(makeRow(l), interimEl);
     if(conf > 0){ confSum += conf; confCount++; }
@@ -315,7 +329,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     r.onerror = e => {
       if(e.error === 'not-allowed' || e.error === 'service-not-allowed'){
         stop();
-        notice('마이크 사용이 막혀 있습니다. 주소창 옆 자물쇠 아이콘에서 마이크를 허용한 뒤 다시 시작해 주세요.', 'err');
+        notice('마이크 사용이 막혀 있습니다. 주소창 왼쪽 아이콘을 누르고 권한 → 마이크를 허용한 뒤, 페이지를 새로 고쳐 다시 시작해 주세요.', 'err');
       } else if(e.error === 'network'){
         notice('인터넷 연결이 불안정해 인식이 끊겼습니다. 이 브라우저는 인식에 인터넷을 쓰고 있습니다.', 'info');
       } else if(e.error === 'audio-capture'){
