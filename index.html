@@ -78,6 +78,13 @@ ol.check{margin:0;padding-left:20px;font-size:.88rem;color:var(--ink);display:fl
 .script-text{margin:0;font-size:1.2rem;line-height:1.85;max-width:62em;word-break:keep-all}
 .script-terms .terms{margin-top:6px}
 details{margin-top:8px}
+.compare{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px}
+.compare .hint{margin:0}
+.compare-result{background:var(--accent-soft);border-radius:12px;padding:12px 14px;display:flex;flex-wrap:wrap;gap:8px 24px;align-items:baseline}
+.compare-result .big{font-family:var(--mono);font-size:1.8rem;font-weight:500;color:var(--accent);font-variant-numeric:tabular-nums}
+.compare-result .item{font-size:.9rem;color:var(--ink)}
+.compare-result .item b{font-family:var(--mono);font-weight:500;font-variant-numeric:tabular-nums}
+.compare-result .note{flex-basis:100%;font-size:.82rem;color:var(--muted)}
 summary{cursor:pointer}
 select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--paper);color:var(--ink);width:100%}
 </style>
@@ -101,7 +108,12 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
       <h2>읽을 원고</h2>
       <span class="hint">‘받아쓰기 시작’을 누른 뒤 평소 회의하듯 소리 내어 읽어 주세요. 약 1분 분량입니다.</span>
     </div>
-    <p class="script-text">오늘 회의는 회의 보조 서비스의 첫 시범판 결과를 공유하는 자리입니다. 지금은 태블릿에 내장된 음성인식으로 한국어 받아쓰기를 시험하고 있고, 결과물은 깃허브 페이지에 올려 두었습니다. 다음 단계는 사용자가 구글 드라이브나 노션 같은 저장소를 연결하면, 대화 내용과 관련된 자료를 화면 옆에 카드로 띄워 주는 기능입니다. 비용은 회의 한 시간 기준으로 음성인식과 AI 호출을 합쳐 계산해야 하고, 무료 요금제와 유료 요금제의 차이는 인식 정확도로 두려고 합니다. 고객사 요구사항은 다음 주 화요일까지 정리하고, 견적과 일정은 그다음 주에 확정하겠습니다.</p>
+    <p class="script-text" id="scriptText">오늘 회의는 회의 보조 서비스의 첫 시범판 결과를 공유하는 자리입니다. 지금은 태블릿에 내장된 음성인식으로 한국어 받아쓰기를 시험하고 있고, 결과물은 깃허브 페이지에 올려 두었습니다. 다음 단계는 사용자가 구글 드라이브나 노션 같은 저장소를 연결하면, 대화 내용과 관련된 자료를 화면 옆에 카드로 띄워 주는 기능입니다. 비용은 회의 한 시간 기준으로 음성인식과 AI 호출을 합쳐 계산해야 하고, 무료 요금제와 유료 요금제의 차이는 인식 정확도로 두려고 합니다. 고객사 요구사항은 다음 주 화요일까지 정리하고, 견적과 일정은 그다음 주에 확정하겠습니다.</p>
+    <div class="compare">
+      <button id="btnCompare" type="button">원고와 비교하기</button>
+      <span class="hint">원고만 읽은 기록으로 비교하세요. 다른 말이 섞였다면 ‘기록 지우기’ 후 다시 읽으면 됩니다.</span>
+    </div>
+    <div id="compareResult" class="compare-result" hidden></div>
     <div class="script-terms">
       <span class="hint">원고 속 확인할 용어 — 받아쓴 기록에서 노란색으로 표시하고 몇 번 잡혔는지 셉니다</span>
       <div class="terms" id="termChips"></div>
@@ -187,7 +199,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
 
   let rec = null, running = false, startedAt = 0, tickTimer = null;
   let lines = [], restarts = 0, gapTotal = 0, gapMax = 0, gapStart = 0;
-  let confSum = 0, confCount = 0, interimEl = null, wakeLock = null, pendingInterim = '';
+  let confSum = 0, confCount = 0, interimEl = null, wakeLock = null, pendingInterim = '', sessionId = 0;
 
   function notice(text, kind){
     const n = $('notice');
@@ -271,21 +283,38 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   function addLine(text, conf){
     text = text.trim(); if(!text) return;
     empty.hidden = true;
-    // 안드로이드 크롬은 말하는 동안 점점 길어지는 문장을 매번 '확정'으로 보냄
-    // → 직전 줄과 같은 말이 이어진 것이면 새 줄 대신 직전 줄을 덮어씀
+    // 안드로이드 크롬은 한 번 연결된 동안 한 말 전체를 점점 길게 이어 붙여 매번 '확정'으로 보냄
+    // → 같은 연결 안에서 이어진 말이면: 1.5초 넘게 쉬었다 이어졌으면 늘어난 부분만 새 줄로, 아니면 직전 줄을 늘림
     const last = lines[lines.length - 1];
-    if(last && !last.gap && elapsed() - last.upd < 10000){
-      const a = last.text.replace(/\s/g,''), b = text.replace(/\s/g,'');
-      if(b === a || a.startsWith(b)){ last.upd = elapsed(); return; }
+    if(last && !last.gap && last.sid === sessionId){
+      const a = norm(last.full), b = norm(text);
+      if(b === a || a.startsWith(b)) return;
       if(b.startsWith(a)){
-        last.text = text; last.upd = elapsed();
-        last.el.querySelector('.x').innerHTML = highlight(text);
-        if(conf > 0){ last.conf = conf; }
+        if(elapsed() - last.upd >= 1500){
+          const d = afterPrefix(text, a.length);
+          if(d) pushLine(d, text, a.length, conf);
+          return;
+        }
+        last.full = text; last.upd = elapsed();
+        last.text = afterPrefix(text, last.prefixLen);
+        last.el.querySelector('.x').innerHTML = highlight(last.text);
         updateStats(); renderChips(); scrollDown();
         return;
       }
     }
-    const l = { at: elapsed(), upd: elapsed(), text };
+    pushLine(text, text, 0, conf);
+  }
+
+  const norm = s => s.replace(/\s/g,'');
+  // 공백을 뺀 앞 글자 n개를 건너뛴 나머지 원문
+  function afterPrefix(s, n){
+    let i = 0, c = 0;
+    while(i < s.length && c < n){ if(!/\s/.test(s[i])) c++; i++; }
+    return s.slice(i).trim();
+  }
+
+  function pushLine(text, full, prefixLen, conf){
+    const l = { at: elapsed(), upd: elapsed(), text, full, prefixLen, sid: sessionId };
     lines.push(l);
     log.insertBefore(makeRow(l), interimEl);
     if(conf > 0){ confSum += conf; confCount++; }
@@ -329,6 +358,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     }
     r.onaudiostart = () => { closeGap(); setStatus('live', '받아쓰는 중'); };
     r.onstart = () => {
+      sessionId++;
       setStatus('live', '마이크 연결 중');
       setTimeout(closeGap, 1500); // 소리 시작 신호를 주지 않는 브라우저 대비
     };
@@ -344,7 +374,10 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
       if(interim.trim()){
         interimEl.hidden = false;
         interimEl.querySelector('.t').textContent = fmt(elapsed());
-        interimEl.querySelector('.x').textContent = interim;
+        const lst = lines[lines.length - 1];
+        let shown = interim.trim();
+        if(lst && !lst.gap && lst.sid === sessionId && norm(shown).startsWith(norm(lst.full))) shown = afterPrefix(shown, norm(lst.full).length);
+        interimEl.querySelector('.x').textContent = shown || '…';
         empty.hidden = true;
         scrollDown();
       } else interimEl.hidden = true;
@@ -453,6 +486,37 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     $('clock').textContent = '00:00:00';
     log.querySelectorAll('.row:not(.interim)').forEach(r => r.remove());
     empty.hidden = false; updateStats(); renderChips();
+  });
+
+  // 원고와 받아쓴 글을 공백·문장부호를 뺀 글자 단위로 비교 (편집 거리 기준)
+  const plain = t => t.replace(/[\s.,!?·~…"'“”‘’()\-]/g,'');
+  function editDistance(a, b){
+    let prev = Array.from({length: b.length + 1}, (_, j) => j);
+    for(let i = 1; i <= a.length; i++){
+      const cur = [i];
+      for(let j = 1; j <= b.length; j++){
+        cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+  $('btnCompare').addEventListener('click', () => {
+    const box = $('compareResult'); box.hidden = false;
+    const ref = plain($('scriptText').textContent);
+    const hyp = plain(lines.filter(l => !l.gap).map(l => l.text).join(''));
+    if(!hyp){ box.innerHTML = '<span class="item">아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요.</span>'; return; }
+    const d = editDistance(ref, hyp);
+    const acc = Math.max(0, 1 - d / ref.length);
+    const all = lines.filter(l => !l.gap).map(l => l.text).join(' ');
+    const terms = getTerms();
+    const hit = terms.filter(t => norm(all).includes(norm(t))).length;
+    box.innerHTML =
+      '<span class="big">' + (acc * 100).toFixed(1) + '%</span>' +
+      '<span class="item">글자 정확도</span>' +
+      '<span class="item">원고 <b>' + ref.length + '</b>자 · 받아씀 <b>' + hyp.length + '</b>자 · 다르게 적힌 글자 <b>' + d + '</b>자</span>' +
+      '<span class="item">용어 <b>' + hit + '/' + terms.length + '</b>개 잡힘</span>' +
+      '<span class="note">숫자·영어는 ‘AI’를 ‘에이아이’처럼 소리 나는 대로 적으면 틀린 글자로 셉니다. 대략 95% 이상이면 회의록으로 쓸 만하다고 봅니다.</span>';
   });
 
   $('terms').addEventListener('input', rerenderLog);
