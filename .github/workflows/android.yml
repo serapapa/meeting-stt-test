@@ -1,0 +1,64 @@
+name: 회의 노트 앱 빌드
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  SHERPA_ONNX_VERSION: v1.13.8
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: sherpa-onnx 안드로이드 라이브러리 받기
+        run: |
+          curl -fSL -o libs.tar.bz2 "https://github.com/k2-fsa/sherpa-onnx/releases/download/${SHERPA_ONNX_VERSION}/sherpa-onnx-${SHERPA_ONNX_VERSION}-android.tar.bz2"
+          tar xjf libs.tar.bz2
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp -v jniLibs/arm64-v8a/*.so android/app/src/main/jniLibs/arm64-v8a/
+          ls -lh android/app/src/main/jniLibs/arm64-v8a
+
+      - name: 모델 주소 확인 (참고용)
+        continue-on-error: true
+        run: |
+          for f in silero_vad.onnx \
+                   sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2 \
+                   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2 \
+                   sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2; do
+            code=$(curl -sIL -o /dev/null -w "%{http_code}" "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$f")
+            echo "$code $f"
+          done
+
+      - name: APK 만들기
+        working-directory: android
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: APK 이름 정리
+        run: cp android/app/build/outputs/apk/release/app-release.apk meeting-note.apk && ls -lh meeting-note.apk
+
+      - name: 다운로드용으로 올리기
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: app-${{ github.run_number }}
+          name: 회의 노트 앱 ${{ github.run_number }}
+          body: 태블릿에서 meeting-note.apk 를 눌러 내려받아 설치하세요.
+          files: meeting-note.apk
+          make_latest: true
