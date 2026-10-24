@@ -86,6 +86,17 @@ details{margin-top:8px}
 .compare-result .item b{font-family:var(--mono);font-weight:500;font-variant-numeric:tabular-nums}
 .compare-result .note{flex-basis:100%;font-size:.82rem;color:var(--muted)}
 summary{cursor:pointer}
+.dialog{display:flex;flex-direction:column;gap:6px;max-width:62em}
+.dialog p{margin:0;display:grid;grid-template-columns:56px minmax(0,1fr);gap:10px;font-size:1.15rem;line-height:1.75;word-break:keep-all}
+.who{font-size:.8rem;font-weight:600;color:var(--accent);padding-top:6px}
+.who.other{color:var(--ok)}
+mark.fix{text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;cursor:pointer}
+mark.fix .orig{display:none;font-size:.78em;color:var(--muted);margin-left:4px}
+mark.fix.show .orig{display:inline}
+.toggle{display:flex;align-items:center;gap:8px;font-size:.92rem;margin-top:10px;cursor:pointer}
+.toggle input{width:18px;height:18px}
+.dict{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.dict textarea{font-size:.9rem;line-height:1.6}
 select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--paper);color:var(--ink);width:100%}
 </style>
 </head>
@@ -94,7 +105,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   <header>
     <div>
       <h1>회의 받아쓰기 시험판</h1>
-      <p class="sub">기기 내장 음성인식으로 한국어 회의를 얼마나 받아쓰는지 확인합니다. 녹음 파일은 남지 않습니다.</p>
+      <p class="sub">기기 내장 음성인식으로 여러 사람이 말하는 한국어 회의를 얼마나 받아쓰는지 확인합니다. 녹음 파일은 남지 않습니다.</p>
     </div>
     <div class="controls">
       <button id="btnMain" type="button">받아쓰기 시작</button>
@@ -105,22 +116,41 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
 
   <section class="script" aria-label="읽을 원고">
     <div class="script-head">
-      <h2>읽을 원고</h2>
-      <span class="hint">‘받아쓰기 시작’을 누른 뒤 평소 회의하듯 소리 내어 읽어 주세요. 약 1분 분량입니다.</span>
+      <h2>읽을 원고 · 두 사람 대화</h2>
+      <span class="hint">두 사람이 한 줄씩 번갈아 읽어 주세요. 상대 역할은 태블릿에서 1~2m 떨어진 자리에서 읽으면 실제 회의와 비슷합니다. 약 1분 분량입니다.</span>
     </div>
-    <p class="script-text" id="scriptText">오늘 회의는 회의 보조 서비스의 첫 시범판 결과를 공유하는 자리입니다. 지금은 태블릿에 내장된 음성인식으로 한국어 받아쓰기를 시험하고 있고, 결과물은 깃허브 페이지에 올려 두었습니다. 다음 단계는 사용자가 구글 드라이브나 노션 같은 저장소를 연결하면, 대화 내용과 관련된 자료를 화면 옆에 카드로 띄워 주는 기능입니다. 비용은 회의 한 시간 기준으로 음성인식과 AI 호출을 합쳐 계산해야 하고, 무료 요금제와 유료 요금제의 차이는 인식 정확도로 두려고 합니다. 고객사 요구사항은 다음 주 화요일까지 정리하고, 견적과 일정은 그다음 주에 확정하겠습니다.</p>
+    <div class="dialog" id="scriptText">
+      <p><b class="who">라이언</b><span class="say">이번 주 EAMS 주간보고는 금요일 오전에 기업은행 쪽에 올릴 예정입니다.</span></p>
+      <p><b class="who other">상대</b><span class="say">화면설계서 수정본은 깃허브에 올라가 있나요?</span></p>
+      <p><b class="who">라이언</b><span class="say">네, 깃허브랑 노션 둘 다 올려 두었고 단위테스트 결과도 같이 정리했습니다.</span></p>
+      <p><b class="who other">상대</b><span class="say">요구사항 변경 건은 전진영 이사님 확인이 필요하지 않을까요?</span></p>
+      <p><b class="who">라이언</b><span class="say">맞습니다. 전진영 이사님께는 오늘 오후에 따로 말씀드리겠습니다.</span></p>
+      <p><b class="who other">상대</b><span class="say">모두잇 쪽 제안서는 어떻게 되고 있어요?</span></p>
+      <p><b class="who">라이언</b><span class="say">제안서 초안은 클로드로 정리해서 구글 드라이브 아카이브에 넣어 두었습니다. 심지훈 차장님이 보시고 사티스 일정과 맞춰 주시기로 했습니다.</span></p>
+    </div>
     <div class="compare">
       <button id="btnCompare" type="button">원고와 비교하기</button>
       <span class="hint">원고만 읽은 기록으로 비교하세요. 다른 말이 섞였다면 ‘기록 지우기’ 후 다시 읽으면 됩니다.</span>
     </div>
     <div id="compareResult" class="compare-result" hidden></div>
     <div class="script-terms">
-      <span class="hint">원고 속 확인할 용어 — 받아쓴 기록에서 노란색으로 표시하고 몇 번 잡혔는지 셉니다</span>
+      <span class="hint">내 용어사전 — 받아쓴 기록에서 노란색으로 표시하고 몇 번 잡혔는지 셉니다. 밑줄 친 단어는 사전으로 고친 말이고, 누르면 원래 들린 말이 보입니다.</span>
       <div class="terms" id="termChips"></div>
+      <label class="toggle"><input type="checkbox" id="fixOn" checked> 용어사전으로 자동 교정</label>
       <details>
-        <summary class="hint">용어 바꾸기</summary>
-        <label for="terms" class="hint" style="display:block;margin:6px 0">쉼표로 나눠 입력하세요.</label>
-        <textarea id="terms">회의 보조 서비스, 음성인식, 깃허브, 구글 드라이브, 노션, 저장소, 요금제, 요구사항, 견적, 일정</textarea>
+        <summary class="hint">용어사전 고치기</summary>
+        <div class="dict">
+          <label for="dictTerms" class="hint">용어 — 한 줄에 하나. 영어나 줄임말은 ‘용어 = 읽는 소리, 읽는 소리’로 적으면 그 소리도 찾아 고칩니다.</label>
+          <textarea id="dictTerms" rows="8"></textarea>
+          <label for="dictPairs" class="hint">자주 틀리는 말 — 한 줄에 ‘틀린 말 → 바른 말’. 소리가 많이 달라 자동으로 못 잡는 경우에 씁니다.</label>
+          <textarea id="dictPairs" rows="4"></textarea>
+          <label for="dictKeep" class="hint">고치지 않을 말 — 쉼표로 나눠 입력. 용어와 소리가 비슷하지만 원래 뜻대로 쓰는 말입니다(예: 클라우드는 클로드로 바꾸지 않음).</label>
+          <textarea id="dictKeep" rows="2"></textarea>
+          <div class="row-btn">
+            <button id="btnDictReset" type="button">처음 사전으로 되돌리기</button>
+          </div>
+          <p class="hint">고친 내용은 이 태블릿 브라우저에 저장되어 다음에 열어도 남습니다.</p>
+        </div>
       </details>
     </div>
   </section>
@@ -179,11 +209,11 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
       <div class="panel">
         <h2>시험해 볼 것</h2>
         <ol class="check">
-          <li>위 원고를 소리 내어 읽기 — 기본 정확도</li>
-          <li>평소 회의 말투로 5분 — 끊김 횟수와 빠진 말</li>
-          <li>두 사람이 번갈아 말하기 — 말이 겹칠 때</li>
-          <li>태블릿을 1~2m 떨어뜨려 놓기 — 회의실 거리</li>
-          <li>‘용어 바꾸기’에 실제 업무 용어 넣고 말해 보기</li>
+          <li>두 사람이 원고를 번갈아 읽기 — 상대 목소리도 잡히는지</li>
+          <li>상대가 1~2m, 3m 떨어져 읽기 — 회의실 거리</li>
+          <li>두 사람이 말을 겹쳐 보기 — 겹칠 때 어떻게 되는지</li>
+          <li>평소 회의 말투로 5분 — 끊김과 빠진 말</li>
+          <li>자주 틀리는 말을 ‘용어사전 고치기’에 짝으로 등록하고 다시 읽기</li>
           <li>30분 이상 켜 두기 — 발열·배터리·화면 꺼짐</li>
         </ol>
       </div>
@@ -225,20 +255,167 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     const s = $('status'); s.className = 'status' + (kind ? ' ' + kind : ''); $('statusText').textContent = text;
   }
 
-  function getTerms(){
-    return $('terms').value.split(',').map(t => t.trim()).filter(Boolean);
+  // ===== 내 용어사전 =====
+  const DEFAULT_TERMS = ['모두잇','사티스','코어룸','모두처치','EAMS = 이에이엠에스, 이엠스, 이에이엠스','기업은행',
+    '기획PL = 기획피엘','제안서','요구사항','화면설계서','단위테스트','주간보고','클로드','깃허브 = 깃허브, 기트허브',
+    '노션','구글 드라이브','슈퍼베이스 = 슈퍼베이스, 수파베이스','아카이브','심지훈','전진영'].join('\n');
+  const DEFAULT_PAIRS = ['키 커브 → 깃허브','기타부 → 깃허브','조정수 → 저장소','EMS → EAMS'].join('\n');
+  const KEY = 'mstt.dict.v1';
+  let dict = [], pairs = [], keep = new Set();
+  const DEFAULT_KEEP = '클라우드, 확인, 사실, 일정, 설계';
+
+  function loadDict(){
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(_){}
+    $('dictTerms').value = saved && typeof saved.terms === 'string' ? saved.terms : DEFAULT_TERMS;
+    $('dictPairs').value = saved && typeof saved.pairs === 'string' ? saved.pairs : DEFAULT_PAIRS;
+    $('dictKeep').value = saved && typeof saved.keep === 'string' ? saved.keep : DEFAULT_KEEP;
+    $('fixOn').checked = saved ? saved.on !== false : true;
+    parseDict();
   }
+  function saveDict(){
+    try { localStorage.setItem(KEY, JSON.stringify({ terms: $('dictTerms').value, pairs: $('dictPairs').value, keep: $('dictKeep').value, on: $('fixOn').checked })); } catch(_){}
+  }
+  function parseDict(){
+    dict = $('dictTerms').value.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+      const [t, rest] = l.split('=');
+      const term = t.trim();
+      const sounds = [term].concat(rest ? rest.split(',').map(x => x.trim()).filter(Boolean) : []);
+      return { term, sounds: [...new Set(sounds.map(norm))].filter(x => x.length >= 2) };
+    }).filter(d => d.term);
+    pairs = $('dictPairs').value.split('\n').map(l => l.split(/→|->/)).filter(x => x.length === 2)
+      .map(([w, r]) => ({ wrong: w.trim(), right: r.trim() })).filter(x => x.wrong && x.right);
+    keep = new Set($('dictKeep').value.split(/[,\n]/).map(x => norm(x)).filter(Boolean));
+  }
+  function getTerms(){ return dict.map(d => d.term); }
+
+  // 한글을 소리 단위(초성·중성·종성)로 쪼개 비슷한 소리끼리는 적게 틀린 것으로 셈
+  const CHO = 'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ';
+  const JUNG = 'ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ';
+  const JONG = ['', 'K','K','K','N','N','N','T','L','L','L','L','L','L','L','L','M','P','P','T','T','NG','T','T','K','T','P','T'];
+  function sounds(str){
+    const out = [];
+    for(const ch of str.toLowerCase()){
+      const c = ch.charCodeAt(0) - 0xAC00;
+      if(c >= 0 && c < 11172){
+        const cho = CHO[Math.floor(c / 588)], jung = JUNG[Math.floor((c % 588) / 28)], jong = JONG[c % 28];
+        if(cho !== 'ㅇ') out.push('C' + cho);
+        out.push('V' + jung);
+        if(jong) out.push('J' + jong);
+      } else if(/\S/.test(ch)) out.push('O' + ch);
+    }
+    return out;
+  }
+  const CGROUP = { 'ㄱ':1,'ㄲ':1,'ㅋ':1, 'ㄷ':2,'ㄸ':2,'ㅌ':2, 'ㅂ':3,'ㅃ':3,'ㅍ':3, 'ㅈ':4,'ㅉ':4,'ㅊ':4, 'ㅅ':5,'ㅆ':5, 'ㄴ':6,'ㄹ':6,'ㅁ':6 };
+  const VNEAR = ['ㅐㅔ','ㅒㅖ','ㅙㅞㅚ','ㅏㅓ','ㅓㅗ','ㅗㅜ','ㅜㅡ','ㅡㅓ','ㅕㅛ','ㅣㅢ'];
+  const JSOUND = { K:'ㄱ', T:'ㄷ', P:'ㅂ', N:'ㄴ', L:'ㄹ', M:'ㅁ', NG:'' };
+  function subCost(a, b){
+    if(a === b) return 0;
+    const ta = a[0], tb = b[0], xa = a.slice(1), xb = b.slice(1);
+    if(ta === 'V' && tb === 'V') return VNEAR.some(g => g.includes(xa) && g.includes(xb)) ? 0.45 : 0.8;
+    const ca = ta === 'J' ? JSOUND[xa] : ta === 'C' ? xa : null;
+    const cb = tb === 'J' ? JSOUND[xb] : tb === 'C' ? xb : null;
+    if(ca && cb){
+      if(ca === cb) return 0.3;
+      if(CGROUP[ca] && CGROUP[ca] === CGROUP[cb]) return CGROUP[ca] === 6 ? 0.5 : 0.35;
+      return 0.9;
+    }
+    return 1;
+  }
+  function indelCost(a){ return a === 'Cㅎ' ? 0.4 : a[0] === 'J' ? 0.5 : a[0] === 'C' ? 0.8 : 1; }
+  function similarity(x, y){
+    const a = sounds(x), b = sounds(y);
+    if(!a.length || !b.length) return 0;
+    let prev = [0]; for(let j = 1; j <= b.length; j++) prev[j] = prev[j-1] + indelCost(b[j-1]);
+    for(let i = 1; i <= a.length; i++){
+      const cur = [prev[0] + indelCost(a[i-1])];
+      for(let j = 1; j <= b.length; j++){
+        cur[j] = Math.min(prev[j] + indelCost(a[i-1]), cur[j-1] + indelCost(b[j-1]), prev[j-1] + subCost(a[i-1], b[j-1]));
+      }
+      prev = cur;
+    }
+    return 1 - prev[b.length] / Math.max(a.length, b.length);
+  }
+
+  // 받아쓴 문장 → 조각 목록 [{t:보여줄 글, orig:고치기 전 글(고친 경우)}]
+  function correct(text){
+    if(!$('fixOn').checked || !dict.length && !pairs.length) return [{ t: text }];
+    let segs = [{ t: text }];
+    // 1) 자주 틀리는 말 짝 (띄어쓰기 무시)
+    pairs.forEach(p => {
+      const re = new RegExp(norm(p.wrong).split('').map(c => c.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('\\s*'), 'g');
+      const next = [];
+      segs.forEach(sg => {
+        if(sg.orig !== undefined){ next.push(sg); return; }
+        let last = 0, m;
+        while((m = re.exec(sg.t))){
+          if(m.index > last) next.push({ t: sg.t.slice(last, m.index) });
+          next.push({ t: p.right, orig: m[0] });
+          last = m.index + m[0].length;
+        }
+        if(last < sg.t.length) next.push({ t: sg.t.slice(last) });
+      });
+      segs = next;
+    });
+    // 2) 소리가 비슷한 말 → 사전 용어
+    const out = [];
+    segs.forEach(sg => {
+      if(sg.orig !== undefined){ out.push(sg); return; }
+      const parts = sg.t.split(/(\s+)/);
+      const words = [];
+      parts.forEach(pt => { if(/^\s+$/.test(pt)) words.push({ sp: pt }); else if(pt) words.push({ w: pt }); });
+      for(let i = 0; i < words.length; i++){
+        if(words[i].sp !== undefined){ out.push({ t: words[i].sp }); continue; }
+        let best = null;
+        for(let n = 1; n <= 3; n++){
+          const idx = []; for(let k = i; k < words.length && idx.length < n; k++) if(words[k].w !== undefined) idx.push(k);
+          if(idx.length < n) break;
+          const joined = idx.map(k => words[k].w).join('');
+          dict.forEach(d => d.sounds.forEach(snd => {
+            for(let k = snd.length - 1; k <= snd.length + 1; k++){
+              if(k < 2 || k > joined.length) continue;
+              const head = joined.slice(0, k), rest = joined.slice(k);
+              if(rest.length > 3) continue;
+              const sim = head === snd ? 1 : similarity(head, snd);
+              // 여러 단어를 묶을 때는 마지막 단어까지 실제로 걸쳐야 함
+              if(n > 1 && k <= idx.slice(0, -1).reduce((m, q) => m + words[q].w.length, 0)) continue;
+              if(keep.has(head) || keep.has(words[idx[0]].w)) continue;
+              const thr = n > 1 ? 0.9 : (snd.length <= 2 ? 0.86 : 0.8);
+              if(sim >= thr && (!best || sim > best.sim)){
+                best = { sim, term: d.term, head, rest, end: idx[idx.length - 1], exact: head === snd && head === norm(d.term) };
+              }
+            }
+          }));
+        }
+        if(best){
+          if(best.exact) out.push({ t: best.term + best.rest });
+          else out.push({ t: best.term, orig: best.head }, { t: best.rest });
+          i = best.end;
+        } else out.push({ t: words[i].w });
+      }
+    });
+    return out;
+  }
+  const corrected = text => correct(text).map(sg => sg.t).join('');
+  function fixCount(){
+    return lines.filter(l => !l.gap).reduce((n, l) => n + correct(l.text).filter(sg => sg.orig !== undefined).length, 0);
+  }
+
   function esc(s){ return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-  function highlight(text){
-    let html = esc(text);
-    const terms = getTerms().sort((a,b) => b.length - a.length);
+  function markTerms(html){
+    const terms = getTerms().map(esc).sort((a,b) => b.length - a.length);
     if(!terms.length) return html;
-    const re = new RegExp('(' + terms.map(t => esc(t).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')','g');
+    const re = new RegExp('(' + terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')','g');
     return html.replace(re, '<mark>$1</mark>');
+  }
+  function render(text){
+    return correct(text).map(sg => sg.orig !== undefined
+      ? '<mark class="fix" title="들린 말: ' + esc(sg.orig) + '">' + esc(sg.t) + '<span class="orig">(' + esc(sg.orig) + ')</span></mark>'
+      : markTerms(esc(sg.t))).join('');
   }
 
   function renderChips(){
-    const all = lines.filter(l => !l.gap).map(l => l.text).join('\n');
+    const all = lines.filter(l => !l.gap).map(l => corrected(l.text)).join('\n');
     const box = $('termChips'); box.textContent = '';
     getTerms().forEach(t => {
       let c = 0, i = 0;
@@ -262,7 +439,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
     const t = document.createElement('div'); t.className = 't'; t.textContent = fmt(l.at);
     const x = document.createElement('div'); x.className = 'x';
     if(l.gap) x.textContent = '인식이 ' + (l.gap/1000).toFixed(1) + '초 동안 끊겼다가 다시 연결됨';
-    else x.innerHTML = highlight(l.text);
+    else x.innerHTML = render(l.text);
     row.append(t, x); l.el = row; return row;
   }
 
@@ -298,7 +475,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
         }
         last.full = text; last.upd = elapsed();
         last.text = afterPrefix(text, last.prefixLen);
-        last.el.querySelector('.x').innerHTML = highlight(last.text);
+        last.el.querySelector('.x').innerHTML = render(last.text);
         updateStats(); renderChips(); scrollDown();
         return;
       }
@@ -449,7 +626,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   btnMain.addEventListener('click', () => running ? stop() : start());
 
   function transcript(){
-    return lines.map(l => '[' + fmt(l.at) + '] ' + (l.gap ? '(인식 끊김 ' + (l.gap/1000).toFixed(1) + '초)' : l.text)).join('\n');
+    return lines.map(l => '[' + fmt(l.at) + '] ' + (l.gap ? '(인식 끊김 ' + (l.gap/1000).toFixed(1) + '초)' : correct(l.text).map(sg => sg.orig !== undefined ? sg.t + '(' + sg.orig + ')' : sg.t).join(''))).join('\n');
   }
 
   $('btnCopy').addEventListener('click', () => {
@@ -506,23 +683,34 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   }
   $('btnCompare').addEventListener('click', () => {
     const box = $('compareResult'); box.hidden = false;
-    const ref = plain($('scriptText').textContent);
-    const hyp = plain(lines.filter(l => !l.gap).map(l => l.text).join(''));
-    if(!hyp){ box.innerHTML = '<span class="item">아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요.</span>'; return; }
-    const d = editDistance(ref, hyp);
-    const acc = Math.max(0, 1 - d / ref.length);
-    const all = lines.filter(l => !l.gap).map(l => l.text).join(' ');
+    const ref = plain([...document.querySelectorAll('#scriptText .say')].map(e => e.textContent).join(''));
+    const real = lines.filter(l => !l.gap);
+    const raw = plain(real.map(l => l.text).join(''));
+    if(!raw){ box.innerHTML = '<span class="item">아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요.</span>'; return; }
+    const fixed = plain(real.map(l => corrected(l.text)).join(''));
+    const accOf = h => Math.max(0, 1 - editDistance(ref, h) / ref.length);
+    const before = accOf(raw), after = accOf(fixed);
+    const all = norm(real.map(l => corrected(l.text)).join(''));
     const terms = getTerms();
-    const hit = terms.filter(t => norm(all).includes(norm(t))).length;
+    const hit = terms.filter(t => all.includes(norm(t))).length;
+    const inScript = terms.filter(t => ref.includes(plain(t)));
+    const hitScript = inScript.filter(t => all.includes(norm(t))).length;
     box.innerHTML =
-      '<span class="big">' + (acc * 100).toFixed(1) + '%</span>' +
-      '<span class="item">글자 정확도</span>' +
-      '<span class="item">원고 <b>' + ref.length + '</b>자 · 받아씀 <b>' + hyp.length + '</b>자 · 다르게 적힌 글자 <b>' + d + '</b>자</span>' +
-      '<span class="item">용어 <b>' + hit + '/' + terms.length + '</b>개 잡힘</span>' +
-      '<span class="note">숫자·영어는 ‘AI’를 ‘에이아이’처럼 소리 나는 대로 적으면 틀린 글자로 셉니다. 대략 95% 이상이면 회의록으로 쓸 만하다고 봅니다.</span>';
+      '<span class="big">' + (after * 100).toFixed(1) + '%</span>' +
+      '<span class="item">교정 후 글자 정확도 · 교정 전 <b>' + (before * 100).toFixed(1) + '%</b></span>' +
+      '<span class="item">원고 <b>' + ref.length + '</b>자 · 받아씀 <b>' + fixed.length + '</b>자 · 사전으로 고친 곳 <b>' + fixCount() + '</b>곳</span>' +
+      '<span class="item">원고 속 용어 <b>' + hitScript + '/' + inScript.length + '</b>개 잡힘</span>' +
+      '<span class="note">영어 용어를 소리 나는 대로 적으면 틀린 글자로 셉니다. 대략 95% 이상이면 회의록으로 쓸 만하다고 봅니다.</span>';
   });
 
-  $('terms').addEventListener('input', rerenderLog);
+  ['dictTerms','dictPairs','dictKeep'].forEach(id => $(id).addEventListener('input', () => { parseDict(); saveDict(); rerenderLog(); }));
+  $('fixOn').addEventListener('change', () => { saveDict(); rerenderLog(); });
+  $('btnDictReset').addEventListener('click', () => {
+    $('dictTerms').value = DEFAULT_TERMS; $('dictPairs').value = DEFAULT_PAIRS; $('dictKeep').value = DEFAULT_KEEP;
+    parseDict(); saveDict(); rerenderLog();
+  });
+  log.addEventListener('click', e => { const m = e.target.closest('mark.fix'); if(m) m.classList.toggle('show'); });
+  loadDict();
   renderChips(); updateStats();
 })();
 </script>
