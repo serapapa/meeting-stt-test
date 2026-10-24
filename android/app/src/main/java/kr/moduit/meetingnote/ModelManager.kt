@@ -9,36 +9,48 @@ import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
-/** 앱이 쓰는 음성 모델 목록. 처음 한 번 내려받아 기기 안에 보관한다. */
+/** 앱이 쓰는 음성 모델. 처음 한 번 내려받아 기기 안에 보관한다. */
 data class ModelSpec(
     val key: String,
     val label: String,
     val url: String,
     val isArchive: Boolean,
     val dirName: String,
-    val approxMb: Int,
+    /** 압축을 풀 때 int8이 아닌 큰 위스퍼 원본 파일은 건너뜀 */
+    val skipFullPrecision: Boolean = false,
 )
 
 object Models {
-    private const val BASE = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    private const val ASR = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/"
+    private const val ENH = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models/"
 
-    val VAD = ModelSpec("vad", "말소리 구간 감지", BASE + "silero_vad.onnx", false, "vad", 2)
+    val VAD = ModelSpec("vad", "말소리 구간 감지", ASR + "silero_vad.onnx", false, "vad")
     val STREAM_KO = ModelSpec(
         "stream_ko", "실시간 한국어 인식 (회색 자막)",
-        BASE + "sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2", true,
-        "sherpa-onnx-streaming-zipformer-korean-2024-06-16", 400,
+        ASR + "sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2", true,
+        "sherpa-onnx-streaming-zipformer-korean-2024-06-16",
     )
     val SENSE_VOICE = ModelSpec(
-        "sense_voice", "확정 인식 · SenseVoice (다국어, 빠름)",
-        BASE + "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2", true,
-        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", 160,
+        "sense_voice", "SenseVoice",
+        ASR + "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2", true,
+        "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
     )
     val OFFLINE_KO = ModelSpec(
-        "offline_ko", "확정 인식 · 한국어 전용",
-        BASE + "sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2", true,
-        "sherpa-onnx-zipformer-korean-2024-06-24", 400,
+        "offline_ko", "한국어 전용",
+        ASR + "sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2", true,
+        "sherpa-onnx-zipformer-korean-2024-06-24",
     )
-    val ALL = listOf(VAD, STREAM_KO, SENSE_VOICE, OFFLINE_KO)
+    val WHISPER_SMALL = ModelSpec(
+        "whisper_small", "위스퍼 (작은 것)",
+        ASR + "sherpa-onnx-whisper-small.tar.bz2", true,
+        "sherpa-onnx-whisper-small", skipFullPrecision = true,
+    )
+    val WHISPER_TURBO = ModelSpec(
+        "whisper_turbo", "위스퍼 (큰 것)",
+        ASR + "sherpa-onnx-whisper-turbo.tar.bz2", true,
+        "sherpa-onnx-whisper-turbo", skipFullPrecision = true,
+    )
+    val DENOISE = ModelSpec("denoise", "잡음 제거", ENH + "gtcrn_simple.onnx", false, "denoise")
 }
 
 class ModelManager(private val context: Context) {
@@ -71,7 +83,7 @@ class ModelManager(private val context: Context) {
                 if (++redirects > 8) throw Exception("다운로드 주소가 너무 많이 바뀝니다")
                 continue
             }
-            if (code != 200) throw Exception("다운로드 실패 (서버 응답 $code)")
+            if (code != 200) throw Exception("${spec.label} 다운로드 실패 (서버 응답 $code)")
             break
         }
         val total = conn.contentLengthLong
@@ -98,25 +110,27 @@ class ModelManager(private val context: Context) {
         val target = dir(spec)
         target.deleteRecursively()
         if (spec.isArchive) {
-            extractTarBz2(tmp, root)
+            extractTarBz2(tmp, root, spec.skipFullPrecision)
         } else {
             target.mkdirs()
             tmp.copyTo(File(target, spec.url.substringAfterLast('/')), overwrite = true)
         }
         tmp.delete()
-        if (!target.exists()) throw Exception("압축을 풀었지만 모델 폴더를 찾지 못했습니다")
+        if (!target.exists()) throw Exception("${spec.label}: 압축을 풀었지만 모델 폴더를 찾지 못했습니다")
         marker(spec).writeText("ok")
     }
 
-    private fun extractTarBz2(file: File, dest: File) {
+    private fun extractTarBz2(file: File, dest: File, skipFull: Boolean) {
         val destPath = dest.canonicalPath
         TarArchiveInputStream(BZip2CompressorInputStream(BufferedInputStream(file.inputStream(), 1 shl 16))).use { tar ->
             while (true) {
                 val entry = tar.nextEntry ?: break
-                val out = File(dest, entry.name)
+                val name = entry.name
+                val out = File(dest, name)
                 if (!out.canonicalPath.startsWith(destPath)) continue
-                // 시험용 음성 파일 등은 건너뜀
-                if (entry.name.contains("/test_wavs/")) continue
+                if (name.contains("/test_wavs/")) continue
+                if (skipFull && name.endsWith(".onnx") && !name.contains(".int8.")) continue
+                if (skipFull && name.endsWith(".weights")) continue
                 if (entry.isDirectory) {
                     out.mkdirs()
                 } else {
@@ -127,20 +141,20 @@ class ModelManager(private val context: Context) {
         }
     }
 
-    fun delete(spec: ModelSpec) {
-        dir(spec).deleteRecursively()
-    }
-
-    /** 모델 폴더에서 이름 조건에 맞는 파일 찾기 (int8 우선 여부 지정) */
-    fun find(spec: ModelSpec, prefix: String, preferInt8: Boolean): String {
-        val files = dir(spec).walkTopDown().filter { it.isFile && it.name.startsWith(prefix) && it.name.endsWith(".onnx") }.toList()
+    /** 모델 폴더에서 이름에 key가 들어간 .onnx 파일 찾기 (int8 우선 여부 지정) */
+    fun find(spec: ModelSpec, key: String, preferInt8: Boolean): String {
+        val files = dir(spec).walkTopDown().filter { it.isFile && it.name.contains(key) && it.name.endsWith(".onnx") }.toList()
         val int8 = files.filter { it.name.contains(".int8.") }
         val plain = files.filter { !it.name.contains(".int8.") }
         val pick = if (preferInt8) (int8.firstOrNull() ?: plain.firstOrNull()) else (plain.firstOrNull() ?: int8.firstOrNull())
-        return pick?.absolutePath ?: throw Exception("${spec.label} 모델에서 $prefix 파일을 찾지 못했습니다")
+        return pick?.absolutePath ?: throw Exception("${spec.label} 모델에서 '$key' 파일을 찾지 못했습니다")
     }
 
     fun tokens(spec: ModelSpec): String =
-        dir(spec).walkTopDown().firstOrNull { it.isFile && it.name == "tokens.txt" }?.absolutePath
+        dir(spec).walkTopDown().firstOrNull { it.isFile && it.name.endsWith("tokens.txt") }?.absolutePath
             ?: throw Exception("${spec.label} 모델에서 tokens.txt 파일을 찾지 못했습니다")
+
+    fun onnx(spec: ModelSpec): String =
+        dir(spec).walkTopDown().firstOrNull { it.isFile && it.name.endsWith(".onnx") }?.absolutePath
+            ?: throw Exception("${spec.label} 모델 파일을 찾지 못했습니다")
 }

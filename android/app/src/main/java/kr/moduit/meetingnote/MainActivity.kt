@@ -15,6 +15,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.view.Gravity
@@ -25,11 +26,15 @@ import android.view.WindowManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
 class MainActivity : Activity(), TranscriberListener {
@@ -44,21 +49,28 @@ class MainActivity : Activity(), TranscriberListener {
     private val cAccentSoft = Color.parseColor("#E8F0FE")
     private val cRec = Color.parseColor("#D93025")
     private val cOk = Color.parseColor("#1E7A46")
+    private val cDoubt = Color.parseColor("#FFF1A8")
 
     private val ui = Handler(Looper.getMainLooper())
     private lateinit var models: ModelManager
     private val prefs by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    private val recDir by lazy { File(filesDir, "recordings").apply { mkdirs() } }
 
     private lateinit var btnMain: Button
     private lateinit var statusView: TextView
     private lateinit var clockView: TextView
     private lateinit var levelBar: ProgressBar
-    private lateinit var modelBox: LinearLayout
     private lateinit var modelStatus: TextView
     private lateinit var btnDownload: Button
-    private lateinit var spFinal: Spinner
+    private lateinit var spMode: Spinner
+    private lateinit var spWhisper: Spinner
+    private lateinit var spDenoise: Spinner
     private lateinit var spMic: Spinner
     private lateinit var spGain: Spinner
+    private lateinit var cbRecord: CheckBox
+    private lateinit var spRecs: Spinner
+    private lateinit var btnRerun: Button
+    private lateinit var btnRecDelete: Button
     private lateinit var linesBox: LinearLayout
     private lateinit var interimView: TextView
     private lateinit var logScroll: ScrollView
@@ -68,15 +80,20 @@ class MainActivity : Activity(), TranscriberListener {
     private lateinit var statsView: TextView
 
     private var transcriber: Transcriber? = null
+    private var rerunning = false
     private var startedAt = 0L
+    private var sessionOffset = 0L
     private var downloading = false
     private var clearArmed = false
+    private var recDeleteArmed = false
+    private var recFiles = listOf<File>()
 
-    private data class Line(val startMs: Long, val text: String, val latencyMs: Long)
-    private val lines = mutableListOf<Line>()
+    private val lines = mutableListOf<FinalResult>()
+    private val lineOffsets = mutableListOf<Long>()
     private val latencies = mutableListOf<Long>()
 
-    private val gains = listOf(1f, 2f, 3f, 4f, 6f)
+    private val gains = listOf(1f, 2f, 3f, 4f, 6f, 8f)
+    private val whispers = listOf(Models.WHISPER_SMALL, Models.WHISPER_TURBO)
 
     private val script = listOf(
         "라이언" to "이번 주 EAMS 주간보고는 금요일 오전에 기업은행 쪽에 올릴 예정입니다.",
@@ -92,22 +109,22 @@ class MainActivity : Activity(), TranscriberListener {
         super.onCreate(savedInstanceState)
         models = ModelManager(this)
         window.statusBarColor = cBg
+        @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
         setContentView(buildUi())
         refreshModels()
+        refreshRecordings()
         ui.post(clockTick)
     }
 
-    // ---------------- 화면 구성 ----------------
+    // ---------------- 화면 구성 도우미 ----------------
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         setPadding(dp(16), dp(12), dp(16), dp(12))
-        background = GradientDrawable().apply {
-            setColor(cPaper); cornerRadius = dp(14).toFloat(); setStroke(dp(1), cLine)
-        }
+        background = GradientDrawable().apply { setColor(cPaper); cornerRadius = dp(14).toFloat(); setStroke(dp(1), cLine) }
     }
 
     private fun label(text: String, size: Float = 13f, color: Int = cMuted, bold: Boolean = false) = TextView(this).apply {
@@ -140,6 +157,8 @@ class MainActivity : Activity(), TranscriberListener {
     private fun lp(w: Int = MATCH_PARENT, h: Int = WRAP_CONTENT, weight: Float = 0f, top: Int = 0) =
         LinearLayout.LayoutParams(w, h, weight).apply { topMargin = dp(top) }
 
+    // ---------------- 화면 ----------------
+
     private fun buildUi(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -147,7 +166,6 @@ class MainActivity : Activity(), TranscriberListener {
             setPadding(dp(16), dp(16), dp(16), dp(12))
         }
 
-        // 머리
         val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val titleCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         titleCol.addView(label("회의 노트", 22f, cInk, true))
@@ -163,34 +181,60 @@ class MainActivity : Activity(), TranscriberListener {
         levelBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 0 }
         root.addView(levelBar, lp(top = 6).apply { height = dp(6) })
 
-        // 위쪽 영역(스크롤): 모델·설정·원고
         val topScroll = ScrollView(this)
         val topCol = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         topScroll.addView(topCol)
 
-        // 모델
-        modelBox = card()
-        modelBox.addView(label("음성 모델", 12f, cMuted, true))
-        modelStatus = label("", 14f, cInk)
-        modelBox.addView(modelStatus, lp(top = 4))
-        btnDownload = button("필요한 모델 내려받기 (와이파이 권장)") { downloadNeeded() }
-        modelBox.addView(btnDownload, lp(top = 8).apply { height = dp(44) })
-        topCol.addView(modelBox, lp(top = 12))
-
-        // 설정
+        // 설정 (모델 목록이 설정에 따라 바뀌므로 먼저 만든다)
         val setCard = card()
         setCard.addView(label("설정 (다음 시작부터 적용)", 12f, cMuted, true))
-        setCard.addView(label("확정 인식 모델", 13f), lp(top = 6))
-        spFinal = spinner(FinalModel.values().map { it.label }, "final", 0) { refreshModels() }
-        setCard.addView(spFinal)
+        setCard.addView(label("확정 인식 방식", 13f), lp(top = 6))
+        spMode = spinner(FinalMode.values().map { it.label }, "mode2", 0) { refreshModels() }
+        setCard.addView(spMode)
+        setCard.addView(label("위스퍼 크기", 13f), lp(top = 6))
+        spWhisper = spinner(listOf("작은 것 (빠름)", "큰 것 (정확, 느림·용량 큼)"), "whisper", 0) { refreshModels() }
+        setCard.addView(spWhisper)
+        setCard.addView(label("잡음 제거", 13f), lp(top = 6))
+        spDenoise = spinner(listOf("끔", "켬 (확정 인식 전에 잡음을 걷어 냄)"), "denoise", 0) { refreshModels() }
+        setCard.addView(spDenoise)
         setCard.addView(label("마이크 방식", 13f), lp(top = 6))
         spMic = spinner(MicMode.values().map { it.label }, "mic", 0) {}
         setCard.addView(spMic)
         setCard.addView(label("소리 키우기", 13f), lp(top = 6))
-        spGain = spinner(gains.map { "${it.toInt()}배" }, "gain", 1) {}
+        spGain = spinner(gains.map { "${it.toInt()}배" }, "gain2", 4) {}
         setCard.addView(spGain)
-        setCard.addView(label("위 막대가 말할 때 절반쯤 차면 적당합니다. 멀리 있는 사람 목소리가 약하면 키우세요.", 12f), lp(top = 4))
+        setCard.addView(label("위 막대가 말할 때 절반쯤 차면 적당합니다.", 12f), lp(top = 4))
+
+        // 모델
+        val modelCard = card()
+        modelCard.addView(label("음성 모델", 12f, cMuted, true))
+        modelStatus = label("", 14f, cInk)
+        modelCard.addView(modelStatus, lp(top = 4))
+        btnDownload = button("필요한 모델 내려받기 (와이파이 권장)") { downloadNeeded() }
+        modelCard.addView(btnDownload, lp(top = 8).apply { height = dp(44) })
+
+        topCol.addView(modelCard, lp(top = 12))
         topCol.addView(setCard, lp(top = 12))
+
+        // 녹음
+        val recCard = card()
+        recCard.addView(label("녹음", 12f, cMuted, true))
+        cbRecord = CheckBox(this).apply {
+            text = "받아쓰는 동안 녹음 파일도 남기기"; setTextColor(cInk); textSize = 14f
+            isChecked = prefs.getBoolean("record", true)
+            setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("record", v).apply() }
+        }
+        recCard.addView(cbRecord, lp(top = 4))
+        recCard.addView(label("남긴 녹음을 지금 설정으로 다시 인식해, 같은 소리로 설정끼리 비교할 수 있습니다.", 12f), lp(top = 2))
+        spRecs = Spinner(this)
+        recCard.addView(spRecs, lp(top = 6))
+        val recBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btnRerun = button("선택한 녹음 다시 인식") { rerun() }
+        recBtns.addView(btnRerun, lp(0, dp(44), 1f))
+        btnRecDelete = button("선택한 녹음 지우기") { deleteRecording() }
+        recBtns.addView(btnRecDelete, lp(0, dp(44), 1f).apply { leftMargin = dp(8) })
+        recCard.addView(recBtns, lp(top = 6))
+        topCol.addView(recCard, lp(top = 12))
 
         // 원고
         val scCard = card()
@@ -223,10 +267,10 @@ class MainActivity : Activity(), TranscriberListener {
 
         root.addView(topScroll, lp(MATCH_PARENT, 0, 0.42f))
 
-        // 받아쓰기 기록
+        // 기록
         val logCard = card()
         val logHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        logHead.addView(label("받아쓰기 기록", 12f, cMuted, true), lp(0, WRAP_CONTENT, 1f))
+        logHead.addView(label("받아쓰기 기록 · 문장을 누르면 모델별 결과", 12f, cMuted, true), lp(0, WRAP_CONTENT, 1f))
         statsView = label("", 12f)
         logHead.addView(statsView)
         logCard.addView(logHead)
@@ -240,40 +284,46 @@ class MainActivity : Activity(), TranscriberListener {
         logCard.addView(logScroll, lp(MATCH_PARENT, 0, 1f, top = 6))
         root.addView(logCard, lp(MATCH_PARENT, 0, 0.58f, top = 12))
 
-        // 아래 버튼
         val bottom = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         bottom.addView(button("기록 공유·저장") { share() }, lp(0, dp(48), 1f))
         btnClear = button("기록 지우기") { clearLog() }
         bottom.addView(btnClear, lp(0, dp(48), 1f).apply { leftMargin = dp(8) })
         root.addView(bottom, lp(top = 10))
-
         return root
     }
 
-    private fun toggleScript(it: Button) {
+    private fun toggleScript(b: Button) {
         val show = scriptBox.visibility != View.VISIBLE
         scriptBox.visibility = if (show) View.VISIBLE else View.GONE
-        it.text = if (show) "접기" else "펼치기"
+        b.text = if (show) "접기" else "펼치기"
     }
 
-    // ---------------- 모델 ----------------
+    // ---------------- 설정·모델 ----------------
 
-    private fun neededModels(): List<ModelSpec> {
-        val list = mutableListOf(Models.VAD, Models.STREAM_KO)
-        when (FinalModel.values()[spFinal.selectedItemPosition]) {
-            FinalModel.SENSE_VOICE -> list += Models.SENSE_VOICE
-            FinalModel.OFFLINE_KO -> list += Models.OFFLINE_KO
-            FinalModel.NONE -> {}
+    private fun options(): Options {
+        var mic = MicMode.values()[spMic.selectedItemPosition]
+        if (mic == MicMode.UNPROCESSED) {
+            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (am.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) != "true") mic = MicMode.RECOGNITION
         }
-        return list
+        return Options(
+            mode = FinalMode.values()[spMode.selectedItemPosition],
+            whisper = whispers[spWhisper.selectedItemPosition],
+            denoise = spDenoise.selectedItemPosition == 1,
+            mic = mic,
+            gain = gains[spGain.selectedItemPosition],
+        )
     }
+
+    private fun neededModels(): List<ModelSpec> = Engines.needed(options())
 
     private fun refreshModels() {
-        if (!::spFinal.isInitialized) return
+        if (!::spMic.isInitialized || !::modelStatus.isInitialized) return
         val sb = StringBuilder()
         neededModels().forEach { m ->
-            sb.append(if (models.isReady(m)) "✓ " else "· ").append(m.label)
-            sb.append(if (models.isReady(m)) "  (${models.sizeMb(m)}MB)" else "  — 아직 없음").append('\n')
+            val ready = models.isReady(m)
+            sb.append(if (ready) "✓ " else "· ").append(m.label)
+            sb.append(if (ready) "  (${models.sizeMb(m)}MB)" else "  — 아직 없음").append('\n')
         }
         modelStatus.text = sb.toString().trim()
         val missing = neededModels().count { !models.isReady(it) }
@@ -293,11 +343,9 @@ class MainActivity : Activity(), TranscriberListener {
             try {
                 todo.forEachIndexed { i, m ->
                     models.download(m) { got, total ->
-                        ui.post {
-                            statusView.text = "내려받는 중 ${i + 1}/${todo.size} · ${m.label} · ${got}MB" + if (total > 0) " / ${total}MB" else ""
-                        }
+                        ui.post { statusView.text = "내려받는 중 ${i + 1}/${todo.size} · ${m.label} · ${got}MB" + if (total > 0) " / ${total}MB" else "" }
                     }
-                    ui.post { statusView.text = "압축 푸는 중 · ${m.label}"; refreshModels() }
+                    ui.post { refreshModels() }
                 }
                 ui.post { downloading = false; refreshModels(); statusView.text = "준비됨" }
             } catch (t: Throwable) {
@@ -306,10 +354,54 @@ class MainActivity : Activity(), TranscriberListener {
         }.start()
     }
 
-    // ---------------- 녹음 ----------------
+    // ---------------- 녹음 파일 ----------------
+
+    private fun refreshRecordings() {
+        recFiles = (recDir.listFiles { f -> f.name.endsWith(".wav") }?.toList() ?: emptyList()).sortedByDescending { it.lastModified() }
+        val names = if (recFiles.isEmpty()) listOf("남긴 녹음이 없습니다") else recFiles.map {
+            val sec = (it.length() - 44) / 2 / 16000
+            "${it.nameWithoutExtension}  (${sec / 60}분 ${sec % 60}초)"
+        }
+        spRecs.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, names)
+        btnRerun.isEnabled = recFiles.isNotEmpty()
+        btnRecDelete.isEnabled = recFiles.isNotEmpty()
+    }
+
+    private fun selectedRecording(): File? = recFiles.getOrNull(spRecs.selectedItemPosition)
+
+    private fun rerun() {
+        if (transcriber != null) return
+        val f = selectedRecording() ?: return
+        val missing = neededModels().filter { !models.isReady(it) && it != Models.STREAM_KO }
+        if (missing.isNotEmpty()) { statusView.text = "모델을 먼저 내려받아 주세요"; return }
+        clearLogNow()
+        rerunning = true
+        startedAt = 0L; sessionOffset = 0L
+        val t = Transcriber(models, options(), this, inputWav = f)
+        transcriber = t
+        setBusyUi(true, "다시 인식 중…")
+        t.start()
+    }
+
+    private fun deleteRecording() {
+        val f = selectedRecording() ?: return
+        if (!recDeleteArmed) {
+            recDeleteArmed = true
+            btnRecDelete.text = "한 번 더 누르면 지웁니다"; btnRecDelete.setTextColor(cRec)
+            ui.postDelayed({ recDeleteArmed = false; btnRecDelete.text = "선택한 녹음 지우기"; btnRecDelete.setTextColor(cInk) }, 3000)
+            return
+        }
+        recDeleteArmed = false
+        btnRecDelete.text = "선택한 녹음 지우기"; btnRecDelete.setTextColor(cInk)
+        f.delete()
+        refreshRecordings()
+    }
+
+    // ---------------- 받아쓰기 ----------------
 
     private fun onMainClick() {
-        if (transcriber != null) { stopRec(); return }
+        val t = transcriber
+        if (t != null) { if (!rerunning) { t.stop(); btnMain.isEnabled = false; btnMain.text = "정리하는 중…" }; return }
         val missing = neededModels().filter { !models.isReady(it) }
         if (missing.isNotEmpty()) { statusView.text = "모델을 먼저 내려받아 주세요"; return }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -326,40 +418,38 @@ class MainActivity : Activity(), TranscriberListener {
     }
 
     private fun startRec() {
-        var mic = MicMode.values()[spMic.selectedItemPosition]
-        if (mic == MicMode.UNPROCESSED) {
-            val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            if (am.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) != "true") {
-                mic = MicMode.RECOGNITION
-                statusView.text = "이 기기는 원음 방식을 지원하지 않아 음성인식용 방식으로 받습니다"
-            }
-        }
-        val t = Transcriber(models, FinalModel.values()[spFinal.selectedItemPosition], mic, gains[spGain.selectedItemPosition], this)
-        transcriber = t
+        val opt = options()
+        val recFile = if (cbRecord.isChecked) {
+            File(recDir, "녹음_" + SimpleDateFormat("yyyyMMdd_HHmm", Locale.KOREA).format(Date()) + ".wav")
+        } else null
+        rerunning = false
         if (startedAt == 0L) startedAt = SystemClock.elapsedRealtime()
         sessionOffset = SystemClock.elapsedRealtime() - startedAt
-        btnMain.text = "받아쓰기 정지"
-        (btnMain.background as GradientDrawable).setColor(cRec)
+        val t = Transcriber(models, opt, this, recordTo = recFile)
+        transcriber = t
+        setBusyUi(true, null)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         t.start()
     }
 
-    private fun stopRec() {
-        val t = transcriber ?: return
-        transcriber = null
-        btnMain.isEnabled = false
-        btnMain.text = "정리하는 중…"
-        Thread {
-            t.stop()
-            ui.post {
-                btnMain.isEnabled = true
-                btnMain.text = "받아쓰기 다시 시작"
-                (btnMain.background as GradientDrawable).setColor(cAccent)
-                levelBar.progress = 0
-                window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                refreshModels()
+    private fun setBusyUi(busy: Boolean, rerunText: String?) {
+        if (busy) {
+            if (rerunText != null) {
+                btnMain.text = rerunText; btnMain.isEnabled = false
+            } else {
+                btnMain.text = "받아쓰기 정지"
+                (btnMain.background as GradientDrawable).setColor(cRec)
             }
-        }.start()
+            btnRerun.isEnabled = false; btnDownload.isEnabled = false
+        } else {
+            btnMain.isEnabled = true
+            btnMain.text = if (lines.isEmpty()) "받아쓰기 시작" else "받아쓰기 다시 시작"
+            (btnMain.background as GradientDrawable).setColor(cAccent)
+            levelBar.progress = 0
+            btnDownload.isEnabled = !downloading
+            refreshRecordings()
+            refreshModels()
+        }
     }
 
     override fun onDestroy() {
@@ -370,21 +460,18 @@ class MainActivity : Activity(), TranscriberListener {
 
     // ---------------- 인식 결과 ----------------
 
-    override fun onStatus(text: String) { ui.post { if (transcriber != null || text == "멈춤") statusView.text = text } }
+    override fun onStatus(text: String) { ui.post { statusView.text = text } }
 
     override fun onInterim(text: String) {
-        ui.post {
-            interimView.text = text
-            scrollIfNear()
-        }
+        ui.post { interimView.text = text; scrollIfNear() }
     }
 
-    override fun onFinal(text: String, startMs: Long, endMs: Long, latencyMs: Long) {
+    override fun onFinal(r: FinalResult) {
         ui.post {
-            val line = Line(startMs + offsetMs(), text, latencyMs)
-            lines += line
-            if (latencyMs > 0) latencies += latencyMs
-            linesBox.addView(lineView(line), lp(top = 6))
+            lines += r
+            lineOffsets += if (rerunning) 0L else sessionOffset
+            if (r.latencyMs > 0) latencies += r.latencyMs
+            linesBox.addView(lineView(r, lineOffsets.last()), lp(top = 6))
             updateStats()
             scrollIfNear()
         }
@@ -392,27 +479,60 @@ class MainActivity : Activity(), TranscriberListener {
 
     override fun onLevel(level: Float) { ui.post { levelBar.progress = (level * 100).toInt() } }
 
+    override fun onProgress(percent: Int) { ui.post { statusView.text = "녹음 다시 인식 중 $percent%"; levelBar.progress = percent } }
+
     override fun onError(message: String) {
         ui.post {
             statusView.text = "오류: $message"
-            if (transcriber != null) stopRec()
+            transcriber?.stop()
         }
     }
 
-    /** 정지 후 다시 시작하면 녹음 시간이 0부터 다시 세어지므로, 기록 시간에 앞 녹음분을 더함 */
-    private var sessionOffset = 0L
-    private fun offsetMs(): Long = sessionOffset
+    override fun onFinished() {
+        ui.post {
+            val wasRerun = rerunning
+            transcriber = null
+            rerunning = false
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            setBusyUi(false, null)
+            if (!statusView.text.startsWith("오류")) statusView.text = if (wasRerun) "다시 인식 끝" else "멈춤"
+        }
+    }
 
-    private fun lineView(l: Line) = TextView(this).apply {
-        val sb = SpannableStringBuilder()
-        val t = fmt(l.startMs)
-        sb.append(t).append("   ")
-        sb.setSpan(ForegroundColorSpan(cMuted), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        sb.setSpan(RelativeSizeSpan(0.75f), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-        sb.append(l.text)
-        textSize = 17f; setTextColor(cInk); setLineSpacing(0f, 1.25f)
-        text = sb
-        setPadding(0, dp(4), 0, dp(4))
+    private fun lineView(r: FinalResult, offset: Long): View {
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(4), 0, dp(4)) }
+        val main = TextView(this).apply {
+            val sb = SpannableStringBuilder()
+            val t = fmt(r.startMs + offset)
+            sb.append(t).append("   ")
+            sb.setSpan(ForegroundColorSpan(cMuted), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            sb.setSpan(RelativeSizeSpan(0.75f), 0, t.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            val base = sb.length
+            sb.append(r.text)
+            r.uncertain.forEach { i ->
+                if (i in r.text.indices) sb.setSpan(BackgroundColorSpan(cDoubt), base + i, base + i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            text = sb; textSize = 17f; setTextColor(cInk); setLineSpacing(0f, 1.25f)
+        }
+        col.addView(main)
+        if (r.hyps.size > 1) {
+            val detail = TextView(this).apply {
+                val sb = SpannableStringBuilder()
+                Engines.ORDER.forEach { name ->
+                    val h = r.hyps[name] ?: return@forEach
+                    val s = sb.length
+                    sb.append(name).append("  ")
+                    sb.setSpan(ForegroundColorSpan(cAccent), s, s + name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    sb.append(h.ifBlank { "(결과 없음)" }).append('\n')
+                }
+                text = sb.trim(); textSize = 14f; setTextColor(cMuted); visibility = View.GONE
+                setPadding(dp(12), dp(6), dp(12), dp(6))
+                background = GradientDrawable().apply { setColor(cBg); cornerRadius = dp(8).toFloat() }
+            }
+            col.addView(detail, lp(top = 4))
+            col.setOnClickListener { detail.visibility = if (detail.visibility == View.VISIBLE) View.GONE else View.VISIBLE }
+        }
+        return col
     }
 
     private fun updateStats() {
@@ -422,7 +542,7 @@ class MainActivity : Activity(), TranscriberListener {
 
     private fun scrollIfNear() {
         val child = logScroll.getChildAt(0) ?: return
-        val near = child.height - (logScroll.scrollY + logScroll.height) < dp(160)
+        val near = child.height - (logScroll.scrollY + logScroll.height) < dp(200)
         if (near) logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
@@ -433,22 +553,22 @@ class MainActivity : Activity(), TranscriberListener {
 
     private val clockTick = object : Runnable {
         override fun run() {
-            if (startedAt > 0 && transcriber != null) clockView.text = fmt(SystemClock.elapsedRealtime() - startedAt)
+            if (startedAt > 0 && transcriber != null && !rerunning) clockView.text = fmt(SystemClock.elapsedRealtime() - startedAt)
             ui.postDelayed(this, 500)
         }
     }
 
     // ---------------- 기록 다루기 ----------------
 
-    private fun transcriptText(): String = lines.joinToString("\n") { "[${fmt(it.startMs)}] ${it.text}" }
+    private fun transcriptText(): String =
+        lines.indices.joinToString("\n") { i -> "[${fmt(lines[i].startMs + lineOffsets[i])}] ${lines[i].text}" }
 
     private fun share() {
         if (lines.isEmpty()) { statusView.text = "아직 공유할 기록이 없습니다"; return }
-        val head = "회의 노트 기록 · 문장 ${lines.size}개\n\n"
         val i = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "회의 노트 기록")
-            putExtra(Intent.EXTRA_TEXT, head + transcriptText())
+            putExtra(Intent.EXTRA_TEXT, "회의 노트 기록 · 문장 ${lines.size}개\n\n" + transcriptText())
         }
         startActivity(Intent.createChooser(i, "기록 공유·저장"))
     }
@@ -456,14 +576,17 @@ class MainActivity : Activity(), TranscriberListener {
     private fun clearLog() {
         if (!clearArmed) {
             clearArmed = true
-            btnClear.text = "한 번 더 누르면 지웁니다"
-            btnClear.setTextColor(cRec)
+            btnClear.text = "한 번 더 누르면 지웁니다"; btnClear.setTextColor(cRec)
             ui.postDelayed({ clearArmed = false; btnClear.text = "기록 지우기"; btnClear.setTextColor(cInk) }, 3000)
             return
         }
         clearArmed = false
         btnClear.text = "기록 지우기"; btnClear.setTextColor(cInk)
-        lines.clear(); latencies.clear(); linesBox.removeAllViews(); interimView.text = ""
+        clearLogNow()
+    }
+
+    private fun clearLogNow() {
+        lines.clear(); lineOffsets.clear(); latencies.clear(); linesBox.removeAllViews(); interimView.text = ""
         compareView.visibility = View.GONE
         if (transcriber == null) { startedAt = 0L; clockView.text = "00:00:00" }
         updateStats()
@@ -471,35 +594,29 @@ class MainActivity : Activity(), TranscriberListener {
 
     // ---------------- 원고 비교 ----------------
 
-    private fun plain(s: String) = s.replace(Regex("[\\s.,!?·~…\"'“”‘’()\\-]"), "")
-
-    private fun editDistance(a: String, b: String): Int {
-        var prev = IntArray(b.length + 1) { it }
-        for (i in 1..a.length) {
-            val cur = IntArray(b.length + 1)
-            cur[0] = i
-            for (j in 1..b.length) {
-                cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
-            }
-            prev = cur
-        }
-        return prev[b.length]
-    }
+    private fun plain(s: String) = s.replace(Regex("[\\s.,!?·~…\"'“”‘’()\\-:;]"), "")
 
     private fun compare() {
         val ref = plain(script.joinToString("") { it.second })
-        val hyp = plain(lines.joinToString("") { it.text })
         compareView.visibility = View.VISIBLE
-        if (hyp.isEmpty()) { compareView.text = "아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요."; return }
-        val d = editDistance(ref, hyp)
-        val acc = maxOf(0.0, 1.0 - d.toDouble() / ref.length)
+        if (lines.isEmpty()) { compareView.text = "아직 받아쓴 기록이 없습니다. 원고를 읽은 뒤 눌러 주세요."; return }
         val terms = listOf("EAMS", "주간보고", "기업은행", "화면설계서", "깃허브", "노션", "단위테스트", "요구사항", "전진영", "모두잇", "제안서", "클로드", "구글드라이브", "아카이브", "심지훈", "사티스")
-        val all = plain(lines.joinToString("") { it.text })
-        val hit = terms.count { all.contains(it) }
-        compareView.text = String.format(
-            Locale.KOREA,
-            "글자 정확도 %.1f%%\n원고 %d자 · 받아씀 %d자 · 다르게 적힌 글자 %d자\n원고 속 용어 %d/%d개 잡힘\n대략 95%% 이상이면 회의록으로 쓸 만하다고 봅니다.",
-            acc * 100, ref.length, hyp.length, d, hit, terms.size,
-        )
+        fun score(text: String): String {
+            val h = plain(text)
+            if (h.isEmpty()) return "결과 없음"
+            val d = Combiner.distance(ref, h)
+            val acc = maxOf(0.0, 1.0 - d.toDouble() / ref.length) * 100
+            val hit = terms.count { h.contains(it) }
+            return String.format(Locale.KOREA, "%.1f%%  (용어 %d/%d)", acc, hit, terms.size)
+        }
+        val sb = StringBuilder()
+        sb.append("합친 결과  ").append(score(lines.joinToString("") { it.text })).append('\n')
+        Engines.ORDER.forEach { name ->
+            if (lines.any { it.hyps.containsKey(name) }) {
+                sb.append(name).append("  ").append(score(lines.joinToString("") { it.hyps[name] ?: "" })).append('\n')
+            }
+        }
+        sb.append("글자 정확도 기준 · 대략 95% 이상이면 회의록으로 쓸 만합니다")
+        compareView.text = sb.toString()
     }
 }

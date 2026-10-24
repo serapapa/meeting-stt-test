@@ -39,13 +39,21 @@ jobs:
       - name: 모델 주소 확인 (참고용)
         continue-on-error: true
         run: |
-          for f in silero_vad.onnx \
-                   sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2 \
-                   sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2 \
-                   sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2; do
-            code=$(curl -sIL -o /dev/null -w "%{http_code}" "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$f")
-            echo "$code $f"
+          echo "태블릿에서 meeting-note.apk 를 눌러 내려받아 설치하세요." > notes.md
+          echo "" >> notes.md
+          echo "모델 주소 확인 (200이면 정상):" >> notes.md
+          for u in asr-models/silero_vad.onnx \
+                   asr-models/sherpa-onnx-streaming-zipformer-korean-2024-06-16.tar.bz2 \
+                   asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2 \
+                   asr-models/sherpa-onnx-zipformer-korean-2024-06-24.tar.bz2 \
+                   asr-models/sherpa-onnx-whisper-small.tar.bz2 \
+                   asr-models/sherpa-onnx-whisper-turbo.tar.bz2 \
+                   speech-enhancement-models/gtcrn_simple.onnx; do
+            code=$(curl -sIL -o /dev/null -w "%{http_code}" "https://github.com/k2-fsa/sherpa-onnx/releases/download/$u")
+            size=$(curl -sIL "https://github.com/k2-fsa/sherpa-onnx/releases/download/$u" | grep -i '^content-length' | tail -1 | tr -dc '0-9')
+            echo "- $code $u $(( ${size:-0} / 1048576 ))MB" >> notes.md
           done
+          cat notes.md
 
       - name: APK 만들기
         working-directory: android
@@ -59,6 +67,6 @@ jobs:
         with:
           tag_name: app-${{ github.run_number }}
           name: 회의 노트 앱 ${{ github.run_number }}
-          body: 태블릿에서 meeting-note.apk 를 눌러 내려받아 설치하세요.
+          body_path: notes.md
           files: meeting-note.apk
           make_latest: true

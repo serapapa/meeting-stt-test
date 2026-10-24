@@ -9,7 +9,12 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiser
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserGtcrnModelConfig
+import com.k2fsa.sherpa.onnx.OfflineSpeechDenoiserModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import com.k2fsa.sherpa.onnx.OnlineModelConfig
 import com.k2fsa.sherpa.onnx.OnlineRecognizer
 import com.k2fsa.sherpa.onnx.OnlineRecognizerConfig
@@ -18,17 +23,20 @@ import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
+import java.io.File
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 
-/** 확정 인식에 쓸 모델 */
-enum class FinalModel(val label: String) {
-    SENSE_VOICE("SenseVoice (빠름)"),
-    OFFLINE_KO("한국어 전용 (정확도 비교용)"),
-    NONE("확정 인식 없이 실시간 결과 그대로"),
+/** 확정 인식 방식 */
+enum class FinalMode(val label: String) {
+    ENSEMBLE("세 모델 합치기 (권장)"),
+    WHISPER("위스퍼만"),
+    SENSE_VOICE("SenseVoice만"),
+    OFFLINE_KO("한국어 전용만"),
+    NONE("확정 없이 실시간 결과 그대로"),
 }
 
 /** 마이크 소리 받는 방식 */
@@ -38,164 +46,337 @@ enum class MicMode(val label: String, val source: Int) {
     MIC("일반 마이크", MediaRecorder.AudioSource.MIC),
 }
 
+data class Options(
+    val mode: FinalMode,
+    val whisper: ModelSpec,
+    val denoise: Boolean,
+    val mic: MicMode,
+    val gain: Float,
+)
+
+/** 확정 인식에 들어가는 모델 이름 (우선순위 순) */
+object Engines {
+    const val WHISPER = "위스퍼"
+    const val SENSE_VOICE = "SenseVoice"
+    const val OFFLINE_KO = "한국어 전용"
+    val ORDER = listOf(WHISPER, SENSE_VOICE, OFFLINE_KO)
+
+    fun needed(o: Options): List<ModelSpec> {
+        val l = mutableListOf(Models.VAD, Models.STREAM_KO)
+        when (o.mode) {
+            FinalMode.ENSEMBLE -> { l += o.whisper; l += Models.SENSE_VOICE; l += Models.OFFLINE_KO }
+            FinalMode.WHISPER -> l += o.whisper
+            FinalMode.SENSE_VOICE -> l += Models.SENSE_VOICE
+            FinalMode.OFFLINE_KO -> l += Models.OFFLINE_KO
+            FinalMode.NONE -> {}
+        }
+        if (o.denoise) l += Models.DENOISE
+        return l
+    }
+}
+
+data class FinalResult(
+    val text: String,
+    val uncertain: Set<Int>,
+    val hyps: Map<String, String>,
+    val startMs: Long,
+    val endMs: Long,
+    val latencyMs: Long,
+)
+
 interface TranscriberListener {
     fun onStatus(text: String)
     fun onInterim(text: String)
-    /** 한 사람이 말을 마친 구간의 확정 문장. startMs: 녹음 시작부터, latencyMs: 말이 끝난 뒤 확정까지 */
-    fun onFinal(text: String, startMs: Long, endMs: Long, latencyMs: Long)
+    fun onFinal(r: FinalResult)
     fun onLevel(level: Float)
+    fun onProgress(percent: Int)
     fun onError(message: String)
+    fun onFinished()
 }
 
+/**
+ * 마이크(또는 저장된 녹음)에서 소리를 받아
+ *  1) 실시간 모델로 회색 자막을 띄우고
+ *  2) 말소리 구간을 잘라 확정 모델(들)로 다시 인식해 검은 글씨로 확정한다.
+ */
 class Transcriber(
     private val models: ModelManager,
-    private val finalModel: FinalModel,
-    private val micMode: MicMode,
-    private val gain: Float,
+    private val opt: Options,
     private val listener: TranscriberListener,
+    private val inputWav: File? = null,
+    private val recordTo: File? = null,
 ) {
-    private val sampleRate = 16000
+    private val sr = 16000
     @Volatile private var running = false
     private var thread: Thread? = null
-    private val finalExecutor = Executors.newSingleThreadExecutor()
+
+    private val segWorker = Executors.newSingleThreadExecutor()
+    private val pool = Executors.newFixedThreadPool(3)
 
     private var online: OnlineRecognizer? = null
     private var stream: OnlineStream? = null
     private var vad: Vad? = null
-    private var offline: OfflineRecognizer? = null
+    private var denoiser: OfflineSpeechDenoiser? = null
+    private val engines = linkedMapOf<String, OfflineRecognizer>()
 
     fun start() {
         running = true
-        thread = Thread({ runSafely() }, "audio").also { it.start() }
+        thread = Thread({ run() }, "audio").also { it.start() }
     }
 
+    /** 멈추라고 알린다. 남은 확정 인식이 끝나면 onFinished가 불린다 */
     fun stop() {
         running = false
-        thread?.join(4000)
-        thread = null
-        finalExecutor.shutdown()
-        finalExecutor.awaitTermination(15, TimeUnit.SECONDS)
-        try { offline?.release() } catch (_: Throwable) {}
-        offline = null
     }
 
-    private fun runSafely() {
+    private fun run() {
         try {
-            loadModels()
-            record()
+            load()
+            if (inputWav != null) fromFile(inputWav) else fromMic()
         } catch (t: Throwable) {
             listener.onError(t.message ?: t.toString())
         } finally {
-            try { stream?.release() } catch (_: Throwable) {}
-            try { online?.release() } catch (_: Throwable) {}
-            try { vad?.release() } catch (_: Throwable) {}
-            stream = null; online = null; vad = null
+            segWorker.shutdown()
+            segWorker.awaitTermination(120, TimeUnit.SECONDS)
+            pool.shutdown()
+            listOf<() -> Unit>(
+                { stream?.release() }, { online?.release() }, { vad?.release() }, { denoiser?.release() },
+            ).forEach { try { it() } catch (_: Throwable) {} }
+            engines.values.forEach { try { it.release() } catch (_: Throwable) {} }
+            listener.onInterim("")
+            listener.onFinished()
         }
     }
 
-    private fun loadModels() {
-        listener.onStatus("모델 불러오는 중…")
-        val cores = Runtime.getRuntime().availableProcessors()
+    // ---------------- 모델 불러오기 ----------------
 
-        val st = Models.STREAM_KO
-        online = OnlineRecognizer(
-            null,
-            OnlineRecognizerConfig(
-                featConfig = FeatureConfig(sampleRate = sampleRate, featureDim = 80),
-                modelConfig = OnlineModelConfig(
-                    transducer = OnlineTransducerModelConfig(
-                        encoder = models.find(st, "encoder", true),
-                        decoder = models.find(st, "decoder", false),
-                        joiner = models.find(st, "joiner", true),
+    private fun load() {
+        listener.onStatus("모델 불러오는 중…")
+        val feat = FeatureConfig(sampleRate = sr, featureDim = 80)
+
+        if (inputWav == null) {
+            val st = Models.STREAM_KO
+            online = OnlineRecognizer(
+                null,
+                OnlineRecognizerConfig(
+                    featConfig = feat,
+                    modelConfig = OnlineModelConfig(
+                        transducer = OnlineTransducerModelConfig(
+                            encoder = models.find(st, "encoder", true),
+                            decoder = models.find(st, "decoder", false),
+                            joiner = models.find(st, "joiner", true),
+                        ),
+                        tokens = models.tokens(st), numThreads = 2, modelType = "zipformer",
                     ),
-                    tokens = models.tokens(st),
-                    numThreads = 2,
-                    modelType = "zipformer",
+                    enableEndpoint = false,
                 ),
-                enableEndpoint = false,
-                decodingMethod = "greedy_search",
-            ),
-        )
-        stream = online!!.createStream()
+            )
+            stream = online!!.createStream()
+        }
 
         vad = Vad(
             null,
             VadModelConfig(
                 sileroVadModelConfig = SileroVadModelConfig(
-                    model = models.dir(Models.VAD).resolve("silero_vad.onnx").absolutePath,
-                    threshold = 0.45f,
-                    minSilenceDuration = 0.45f,
-                    minSpeechDuration = 0.25f,
-                    windowSize = 512,
-                    maxSpeechDuration = 15f,
+                    model = models.onnx(Models.VAD),
+                    threshold = 0.5f, minSilenceDuration = 0.3f, minSpeechDuration = 0.2f,
+                    windowSize = 512, maxSpeechDuration = 20f,
                 ),
-                sampleRate = sampleRate,
-                numThreads = 1,
+                sampleRate = sr, numThreads = 1,
             ),
         )
 
-        val threads = max(2, min(4, cores - 2))
-        offline = when (finalModel) {
-            FinalModel.SENSE_VOICE -> {
-                val sv = Models.SENSE_VOICE
-                OfflineRecognizer(
-                    null,
-                    OfflineRecognizerConfig(
-                        featConfig = FeatureConfig(sampleRate = sampleRate, featureDim = 80),
-                        modelConfig = OfflineModelConfig(
-                            senseVoice = OfflineSenseVoiceModelConfig(
-                                model = models.find(sv, "model", true),
-                                language = "ko",
-                                useInverseTextNormalization = true,
-                            ),
-                            tokens = models.tokens(sv),
-                            numThreads = threads,
-                        ),
+        if (opt.denoise) {
+            denoiser = OfflineSpeechDenoiser(
+                null,
+                OfflineSpeechDenoiserConfig(
+                    model = OfflineSpeechDenoiserModelConfig(
+                        gtcrn = OfflineSpeechDenoiserGtcrnModelConfig(model = models.onnx(Models.DENOISE)),
+                        numThreads = 1,
                     ),
-                )
-            }
-            FinalModel.OFFLINE_KO -> {
-                val ko = Models.OFFLINE_KO
-                OfflineRecognizer(
-                    null,
-                    OfflineRecognizerConfig(
-                        featConfig = FeatureConfig(sampleRate = sampleRate, featureDim = 80),
-                        modelConfig = OfflineModelConfig(
-                            transducer = OfflineTransducerModelConfig(
-                                encoder = models.find(ko, "encoder", true),
-                                decoder = models.find(ko, "decoder", false),
-                                joiner = models.find(ko, "joiner", true),
-                            ),
-                            tokens = models.tokens(ko),
-                            numThreads = threads,
-                            modelType = "transducer",
+                ),
+            )
+        }
+
+        val useWhisper = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.WHISPER
+        val useSv = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.SENSE_VOICE
+        val useKo = opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.OFFLINE_KO
+        val th = if (opt.mode == FinalMode.ENSEMBLE) 2 else 4
+
+        if (useWhisper) {
+            val w = opt.whisper
+            engines[Engines.WHISPER] = OfflineRecognizer(
+                null,
+                OfflineRecognizerConfig(
+                    featConfig = feat,
+                    modelConfig = OfflineModelConfig(
+                        whisper = OfflineWhisperModelConfig(
+                            encoder = models.find(w, "encoder", true),
+                            decoder = models.find(w, "decoder", true),
+                            language = "ko", task = "transcribe",
                         ),
+                        tokens = models.tokens(w), numThreads = th, modelType = "whisper",
                     ),
-                )
-            }
-            FinalModel.NONE -> null
+                ),
+            )
+        }
+        if (useSv) {
+            val sv = Models.SENSE_VOICE
+            engines[Engines.SENSE_VOICE] = OfflineRecognizer(
+                null,
+                OfflineRecognizerConfig(
+                    featConfig = feat,
+                    modelConfig = OfflineModelConfig(
+                        senseVoice = OfflineSenseVoiceModelConfig(
+                            model = models.find(sv, "model", true), language = "ko", useInverseTextNormalization = true,
+                        ),
+                        tokens = models.tokens(sv), numThreads = th,
+                    ),
+                ),
+            )
+        }
+        if (useKo) {
+            val ko = Models.OFFLINE_KO
+            engines[Engines.OFFLINE_KO] = OfflineRecognizer(
+                null,
+                OfflineRecognizerConfig(
+                    featConfig = feat,
+                    modelConfig = OfflineModelConfig(
+                        transducer = OfflineTransducerModelConfig(
+                            encoder = models.find(ko, "encoder", true),
+                            decoder = models.find(ko, "decoder", false),
+                            joiner = models.find(ko, "joiner", true),
+                        ),
+                        tokens = models.tokens(ko), numThreads = th, modelType = "transducer",
+                    ),
+                ),
+            )
         }
     }
 
+    // ---------------- 문장 나누기 ----------------
+    // 말소리 감지 결과를 보고 직접 자른다: 0.6초 이상 조용하면 끊고, 12초가 넘으면 강제로 끊는다.
+
+    private val win = 512
+    private val preRollMax = (sr * 0.4).toInt()
+    private val silenceEnd = (sr * 0.6).toInt()
+    private val maxSeg = sr * 12
+    private var preRoll = FloatArray(0)
+    private var seg = FloatArray(0)
+    private var segStart = 0L
+    private var speaking = false
+    private var silenceRun = 0
+    private var pos = 0L          // 지금까지 처리한 샘플 수
+    private var winBuf = FloatArray(0)
+    private var lastInterim = ""
+
+    private fun feed(samples: FloatArray) {
+        winBuf += samples
+        var off = 0
+        while (winBuf.size - off >= win) {
+            val w = winBuf.copyOfRange(off, off + win)
+            off += win
+            vad!!.acceptWaveform(w)
+            val speech = vad!!.isSpeechDetected()
+            vad!!.clear()
+            step(w, speech)
+            pos += win
+        }
+        if (off > 0) winBuf = winBuf.copyOfRange(off, winBuf.size)
+    }
+
+    private fun step(w: FloatArray, speech: Boolean) {
+        if (!speaking) {
+            if (speech) {
+                speaking = true
+                seg = preRoll + w
+                segStart = max(0L, pos - preRoll.size)
+                silenceRun = 0
+            } else {
+                preRoll = (preRoll + w).let { if (it.size > preRollMax) it.copyOfRange(it.size - preRollMax, it.size) else it }
+            }
+            return
+        }
+        seg += w
+        silenceRun = if (speech) 0 else silenceRun + w.size
+        if (silenceRun >= silenceEnd) {
+            emit(seg.copyOfRange(0, max(0, seg.size - silenceRun + sr / 5)))
+            speaking = false
+            preRoll = FloatArray(0)
+        } else if (seg.size >= maxSeg) {
+            emit(seg)
+            seg = FloatArray(0)
+            segStart = pos + win
+        }
+    }
+
+    private fun flushSegment() {
+        if (speaking && seg.size > sr / 4) emit(seg)
+        speaking = false
+        seg = FloatArray(0)
+    }
+
+    private fun emit(samples: FloatArray) {
+        val startMs = segStart * 1000 / sr
+        val endMs = startMs + samples.size * 1000L / sr
+        val snapshot = lastInterim
+        online?.let { on -> stream?.let { on.reset(it) } }
+        lastInterim = ""
+        if (online != null) listener.onInterim("")
+        val endedAt = System.currentTimeMillis()
+        if (samples.size < sr / 4) return
+        segWorker.execute { recognize(samples, snapshot, startMs, endMs, endedAt) }
+    }
+
+    private fun recognize(samples: FloatArray, snapshot: String, startMs: Long, endMs: Long, endedAt: Long) {
+        try {
+            if (engines.isEmpty()) {
+                if (snapshot.isNotBlank()) listener.onFinal(FinalResult(snapshot, emptySet(), emptyMap(), startMs, endMs, 0))
+                return
+            }
+            val clean = denoiser?.let { d ->
+                val r = d.run(samples, sr)
+                if (r.sampleRate == sr) r.samples else samples
+            } ?: samples
+            val futures = engines.map { (name, rec) ->
+                name to pool.submit(Callable {
+                    val s = rec.createStream()
+                    s.acceptWaveform(clean, sr)
+                    rec.decode(s)
+                    val t = rec.getResult(s).text.trim()
+                    s.release()
+                    t
+                })
+            }
+            val hyps = linkedMapOf<String, String>()
+            futures.forEach { (name, f) -> hyps[name] = try { f.get(120, TimeUnit.SECONDS) } catch (t: Throwable) { "" } }
+            val ordered = Engines.ORDER.mapNotNull { hyps[it] }
+            val combined = Combiner.combine(ordered)
+            val text = combined.text.ifBlank { snapshot }
+            if (text.isNotBlank()) {
+                listener.onFinal(FinalResult(text, combined.uncertain, hyps, startMs, endMs, System.currentTimeMillis() - endedAt))
+            }
+        } catch (t: Throwable) {
+            listener.onError("확정 인식 오류: ${t.message}")
+        }
+    }
+
+    // ---------------- 소리 받기 ----------------
+
     @SuppressLint("MissingPermission")
-    private fun record() {
-        val minBuf = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val chunk = sampleRate / 10 // 0.1초
-        val ar = AudioRecord(micMode.source, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, chunk * 2 * 4))
+    private fun fromMic() {
+        val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val chunk = sr / 10
+        val ar = AudioRecord(opt.mic.source, sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, max(minBuf, chunk * 2 * 4))
         if (ar.state != AudioRecord.STATE_INITIALIZED) {
             ar.release()
             throw Exception("마이크를 열지 못했습니다. 설정에서 다른 마이크 방식을 골라 보세요.")
         }
+        val writer = recordTo?.let { WavWriter(it) }
         ar.startRecording()
         listener.onStatus("받아쓰는 중")
-
         val shorts = ShortArray(chunk)
-        val vadWindow = 512
-        var vadBuf = FloatArray(0)
-        var lastInterim = ""
-        var totalSamples = 0L
-        var levelTick = 0
-
+        var tick = 0
         try {
             while (running) {
                 val n = ar.read(shorts, 0, shorts.size)
@@ -203,80 +384,47 @@ class Transcriber(
                 val samples = FloatArray(n)
                 var peak = 0f
                 for (i in 0 until n) {
-                    val v = (shorts[i] / 32768f) * gain
+                    val v = (shorts[i] / 32768f) * opt.gain
                     val c = if (v > 1f) 1f else if (v < -1f) -1f else v
                     samples[i] = c
-                    val a = abs(c)
-                    if (a > peak) peak = a
+                    val a = abs(c); if (a > peak) peak = a
                 }
-                totalSamples += n
-                if (++levelTick % 2 == 0) listener.onLevel(peak)
+                if (++tick % 2 == 0) listener.onLevel(peak)
+                writer?.write(samples)
 
-                // 1차: 실시간 자막
                 val on = online!!; val st = stream!!
-                st.acceptWaveform(samples, sampleRate)
+                st.acceptWaveform(samples, sr)
                 while (on.isReady(st)) on.decode(st)
                 val interim = on.getResult(st).text.trim()
-                if (interim != lastInterim) {
-                    lastInterim = interim
-                    listener.onInterim(interim)
-                }
+                if (interim != lastInterim) { lastInterim = interim; listener.onInterim(interim) }
 
-                // 말소리 구간 감지
-                vadBuf += samples
-                var off = 0
-                while (vadBuf.size - off >= vadWindow) {
-                    vad!!.acceptWaveform(vadBuf.copyOfRange(off, off + vadWindow))
-                    off += vadWindow
-                }
-                if (off > 0) vadBuf = vadBuf.copyOfRange(off, vadBuf.size)
-
-                while (!vad!!.empty()) {
-                    val seg = vad!!.front()
-                    vad!!.pop()
-                    val startMs = seg.start * 1000L / sampleRate
-                    val endMs = startMs + seg.samples.size * 1000L / sampleRate
-                    val snapshot = lastInterim
-                    on.reset(st)
-                    lastInterim = ""
-                    listener.onInterim("")
-                    submitFinal(seg.samples, snapshot, startMs, endMs, System.currentTimeMillis())
-                }
+                feed(samples)
             }
         } finally {
             try { ar.stop() } catch (_: Throwable) {}
             ar.release()
-            // 말하던 중에 정지하면 남은 구간도 확정
-            try {
-                vad?.flush()
-                while (vad != null && !vad!!.empty()) {
-                    val seg = vad!!.front(); vad!!.pop()
-                    val startMs = seg.start * 1000L / sampleRate
-                    submitFinal(seg.samples, lastInterim, startMs, startMs + seg.samples.size * 1000L / sampleRate, System.currentTimeMillis())
-                }
-            } catch (_: Throwable) {}
-            listener.onStatus("멈춤")
+            try { writer?.close() } catch (_: Throwable) {}
+            flushSegment()
+            listener.onStatus("정리하는 중…")
         }
     }
 
-    private fun submitFinal(samples: FloatArray, interimSnapshot: String, startMs: Long, endMs: Long, endedAt: Long) {
-        val rec = offline
-        if (rec == null) {
-            if (interimSnapshot.isNotBlank()) listener.onFinal(interimSnapshot, startMs, endMs, 0)
-            return
-        }
-        finalExecutor.execute {
-            try {
-                val s = rec.createStream()
-                s.acceptWaveform(samples, sampleRate)
-                rec.decode(s)
-                val text = rec.getResult(s).text.trim()
-                s.release()
-                val shown = if (text.isNotBlank()) text else interimSnapshot
-                if (shown.isNotBlank()) listener.onFinal(shown, startMs, endMs, System.currentTimeMillis() - endedAt)
-            } catch (t: Throwable) {
-                listener.onError("확정 인식 오류: ${t.message}")
+    private fun fromFile(file: File) {
+        val r = WavReader16k(file)
+        listener.onStatus("녹음 다시 인식 중…")
+        var done = 0L
+        var lastPct = -1
+        try {
+            while (running) {
+                val samples = r.read(sr / 10) ?: break
+                feed(samples)
+                done += samples.size
+                val pct = if (r.totalSamples > 0) (done * 100 / r.totalSamples).toInt() else 0
+                if (pct != lastPct) { lastPct = pct; listener.onProgress(pct) }
             }
+        } finally {
+            r.close()
+            flushSegment()
         }
     }
 }
