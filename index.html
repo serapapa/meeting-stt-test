@@ -148,7 +148,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
           <dt>가장 길게 끊긴 시간</dt><dd id="mGapMax">0.0초</dd>
           <dt>인식 확신도 평균</dt><dd id="mConf">–</dd>
         </dl>
-        <p class="hint">끊김은 음성인식이 스스로 멈췄다가 다시 붙은 구간입니다. 이 사이에 한 말은 빠졌을 수 있습니다.</p>
+        <p class="hint">끊김은 음성인식이 멈췄다가 다시 붙은 구간입니다. 이 사이에 한 말은 빠졌을 수 있습니다. 안드로이드에서는 중복을 막으려고 문장마다 다시 연결하므로 횟수가 많게 나오는 게 정상이고, 끊긴 시간을 보면 됩니다.</p>
       </div>
 
       <div class="panel">
@@ -194,6 +194,7 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
 <script>
 (function(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const isAndroid = /Android/i.test(navigator.userAgent);
   const $ = id => document.getElementById(id);
   const log = $('log'), empty = $('empty'), btnMain = $('btnMain');
 
@@ -346,7 +347,9 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   function buildRec(){
     const r = new SR();
     r.lang = $('lang').value;
-    r.continuous = true;
+    // 안드로이드 크롬은 연속 모드에서 앞말을 고쳐 가며 전체를 다시 보내 중복이 생김
+    // → 안드로이드는 한 문장씩 받고 바로 다시 연결
+    r.continuous = !isAndroid;
     r.interimResults = true;
     r.maxAlternatives = 1;
 
