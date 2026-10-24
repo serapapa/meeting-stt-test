@@ -7,14 +7,14 @@ import kotlin.math.max
 
 /**
  * 말소리 감지로 소리를 문장 단위로 자른다.
- * 0.6초 이상 조용하면 끊고, 계속 말해도 12초가 넘으면 강제로 끊는다.
+ * 0.35초 이상 조용하면 끊고, 계속 말해서 12초가 넘으면 직전 2초 중 가장 조용한 곳에서 끊는다.
  * onSegment(소리, 시작 위치(샘플 수))
  */
 class Segmenter(vadModel: String, private val onSegment: (FloatArray, Long) -> Unit) {
     private val sr = 16000
     private val win = 512
     private val preRollMax = (sr * 0.4).toInt()
-    private val silenceEnd = (sr * 0.6).toInt()
+    private val silenceEnd = (sr * 0.35).toInt()
     private val maxSeg = sr * 12
 
     private val vad = Vad(
@@ -22,7 +22,7 @@ class Segmenter(vadModel: String, private val onSegment: (FloatArray, Long) -> U
         VadModelConfig(
             sileroVadModelConfig = SileroVadModelConfig(
                 model = vadModel,
-                threshold = 0.5f, minSilenceDuration = 0.3f, minSpeechDuration = 0.2f,
+                threshold = 0.5f, minSilenceDuration = 0.15f, minSpeechDuration = 0.2f,
                 windowSize = win, maxSpeechDuration = 20f,
             ),
             sampleRate = sr, numThreads = 1,
@@ -73,9 +73,20 @@ class Segmenter(vadModel: String, private val onSegment: (FloatArray, Long) -> U
             preRoll = FloatArray(0)
             seg = FloatArray(0)
         } else if (seg.size >= maxSeg) {
-            send(seg, segStart)
-            seg = FloatArray(0)
-            segStart = pos + win
+            // 단어 중간에서 자르지 않도록 마지막 2초에서 가장 조용한 512샘플 구간을 찾는다
+            val from = max(0, seg.size - sr * 2)
+            var cut = seg.size
+            var minE = Double.MAX_VALUE
+            var i = from
+            while (i + win <= seg.size) {
+                var e = 0.0
+                for (k in i until i + win) e += (seg[k] * seg[k]).toDouble()
+                if (e < minE) { minE = e; cut = i + win / 2 }
+                i += win / 2
+            }
+            send(seg.copyOfRange(0, cut), segStart)
+            seg = seg.copyOfRange(cut, seg.size)
+            segStart += cut
         }
     }
 

@@ -15,13 +15,14 @@ import com.k2fsa.sherpa.onnx.OnlineTransducerModelConfig
 import java.io.File
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 import kotlin.math.max
 
 /** 확정 인식 방식 */
 enum class FinalMode(val label: String) {
-    ENSEMBLE("세 모델 합치기 (권장)"),
+    ENSEMBLE("세 모델 합치기: 위스퍼 큰 것+작은 것+SenseVoice (권장)"),
     WHISPER("위스퍼만"),
     SENSE_VOICE("SenseVoice만"),
     OFFLINE_KO("한국어 전용만"),
@@ -45,15 +46,17 @@ data class Options(
 
 /** 확정 인식에 들어가는 모델 이름 (우선순위 순) */
 object Engines {
-    const val WHISPER = "위스퍼"
+    const val WHISPER_L = "위스퍼(큰 것)"
+    const val WHISPER_S = "위스퍼(작은 것)"
     const val SENSE_VOICE = "SenseVoice"
     const val OFFLINE_KO = "한국어 전용"
-    val ORDER = listOf(WHISPER, SENSE_VOICE, OFFLINE_KO)
+    val ORDER = listOf(WHISPER_L, WHISPER_S, SENSE_VOICE, OFFLINE_KO)
+    fun whisperName(spec: ModelSpec) = if (spec == Models.WHISPER_TURBO) WHISPER_L else WHISPER_S
 
     fun needed(o: Options): List<ModelSpec> {
         val l = mutableListOf(Models.VAD, Models.STREAM_KO)
         when (o.mode) {
-            FinalMode.ENSEMBLE -> { l += o.whisper; l += Models.SENSE_VOICE; l += Models.OFFLINE_KO }
+            FinalMode.ENSEMBLE -> { l += Models.WHISPER_TURBO; l += Models.WHISPER_SMALL; l += Models.SENSE_VOICE }
             FinalMode.WHISPER -> l += o.whisper
             FinalMode.SENSE_VOICE -> l += Models.SENSE_VOICE
             FinalMode.OFFLINE_KO -> l += Models.OFFLINE_KO
@@ -120,8 +123,7 @@ class Transcriber(
 
     private fun run() {
         try {
-            load()
-            if (inputWav != null) fromFile(inputWav) else fromMic()
+            if (inputWav != null) { load(); fromFile(inputWav) } else fromMic()
         } catch (t: Throwable) {
             listener.onError(t.message ?: t.toString())
         } finally {
@@ -167,9 +169,17 @@ class Transcriber(
         if (opt.denoise) denoiser = Recognizers.denoiser(models)
 
         val th = if (opt.mode == FinalMode.ENSEMBLE) 2 else 4
-        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.WHISPER) engines[Engines.WHISPER] = Recognizers.create(models, opt.whisper, th)
-        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.SENSE_VOICE) engines[Engines.SENSE_VOICE] = Recognizers.create(models, Models.SENSE_VOICE, th)
-        if (opt.mode == FinalMode.ENSEMBLE || opt.mode == FinalMode.OFFLINE_KO) engines[Engines.OFFLINE_KO] = Recognizers.create(models, Models.OFFLINE_KO, th)
+        when (opt.mode) {
+            FinalMode.ENSEMBLE -> {
+                engines[Engines.WHISPER_L] = Recognizers.create(models, Models.WHISPER_TURBO, th)
+                engines[Engines.WHISPER_S] = Recognizers.create(models, Models.WHISPER_SMALL, th)
+                engines[Engines.SENSE_VOICE] = Recognizers.create(models, Models.SENSE_VOICE, th)
+            }
+            FinalMode.WHISPER -> engines[Engines.whisperName(opt.whisper)] = Recognizers.create(models, opt.whisper, th)
+            FinalMode.SENSE_VOICE -> engines[Engines.SENSE_VOICE] = Recognizers.create(models, Models.SENSE_VOICE, th)
+            FinalMode.OFFLINE_KO -> engines[Engines.OFFLINE_KO] = Recognizers.create(models, Models.OFFLINE_KO, th)
+            FinalMode.NONE -> {}
+        }
     }
 
     private var lastInterim = ""
@@ -194,9 +204,10 @@ class Transcriber(
             }
             val clean = denoiser?.let { Recognizers.denoise(it, samples) } ?: samples
             val futures = engines.map { (name, rec) -> name to pool.submit(Callable { Recognizers.decode(rec, clean) }) }
-            val hyps = linkedMapOf<String, String>()
-            futures.forEach { (name, f) -> hyps[name] = try { f.get(120, TimeUnit.SECONDS) } catch (t: Throwable) { "" } }
-            val ordered = Engines.ORDER.mapNotNull { hyps[it] }
+            val got = futures.associate { (name, f) -> name to (try { f.get(120, TimeUnit.SECONDS) } catch (t: Throwable) { "" }) }
+            val hyps = LinkedHashMap<String, String>()
+            Engines.ORDER.forEach { n -> got[n]?.let { hyps[n] = it } }
+            val ordered = hyps.values.toList()
             val combined = Combiner.combine(ordered)
             val text = combined.text.ifBlank { snapshot }
             if (text.isNotBlank()) {
@@ -209,6 +220,10 @@ class Transcriber(
 
     // ---------------- 소리 받기 ----------------
 
+    /**
+     * 시작하자마자 마이크를 연다. 소리는 따로 받는 스레드가 큐에 모아 두고,
+     * 이 스레드는 모델을 불러온 뒤 쌓인 소리부터 차례로 처리한다.
+     */
     @SuppressLint("MissingPermission")
     private fun fromMic() {
         val minBuf = AudioRecord.getMinBufferSize(sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -218,38 +233,52 @@ class Transcriber(
             ar.release()
             throw Exception("마이크를 열지 못했습니다. 설정에서 다른 마이크 방식을 골라 보세요.")
         }
+        val queue = LinkedBlockingQueue<FloatArray>()
         val writer = recordTo?.let { WavWriter(it) }
         ar.startRecording()
-        listener.onStatus("받아쓰는 중")
-        val shorts = ShortArray(chunk)
-        var tick = 0
-        try {
-            while (running) {
-                val n = ar.read(shorts, 0, shorts.size)
-                if (n <= 0) continue
-                val samples = FloatArray(n)
-                var peak = 0f
-                for (i in 0 until n) {
-                    val v = (shorts[i] / 32768f) * opt.gain
-                    val c = if (v > 1f) 1f else if (v < -1f) -1f else v
-                    samples[i] = c
-                    val a = abs(c); if (a > peak) peak = a
+        val capture = Thread({
+            val shorts = ShortArray(chunk)
+            var tick = 0
+            try {
+                while (running) {
+                    val n = ar.read(shorts, 0, shorts.size)
+                    if (n <= 0) continue
+                    val samples = FloatArray(n)
+                    var peak = 0f
+                    for (i in 0 until n) {
+                        val v = (shorts[i] / 32768f) * opt.gain
+                        val c = if (v > 1f) 1f else if (v < -1f) -1f else v
+                        samples[i] = c
+                        val a = abs(c); if (a > peak) peak = a
+                    }
+                    if (++tick % 2 == 0) listener.onLevel(peak)
+                    try { writer?.write(samples) } catch (_: Throwable) {}
+                    queue.put(samples)
                 }
-                if (++tick % 2 == 0) listener.onLevel(peak)
-                writer?.write(samples)
+            } finally {
+                try { ar.stop() } catch (_: Throwable) {}
+                ar.release()
+                try { writer?.close() } catch (_: Throwable) {}
+            }
+        }, "capture")
+        capture.start()
+        listener.onStatus("말씀하셔도 됩니다 · 모델 불러오는 중…")
 
+        try {
+            load()
+            listener.onStatus("받아쓰는 중")
+            while (running || capture.isAlive || queue.isNotEmpty()) {
+                val samples = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                 val on = online!!; val st = stream!!
                 st.acceptWaveform(samples, sr)
                 while (on.isReady(st)) on.decode(st)
                 val interim = on.getResult(st).text.trim()
                 if (interim != lastInterim) { lastInterim = interim; listener.onInterim(interim) }
-
                 segmenter!!.feed(samples)
             }
         } finally {
-            try { ar.stop() } catch (_: Throwable) {}
-            ar.release()
-            try { writer?.close() } catch (_: Throwable) {}
+            running = false
+            capture.join(3000)
             segmenter?.flush()
             listener.onStatus("정리하는 중…")
         }

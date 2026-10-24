@@ -223,7 +223,7 @@ class MainActivity : Activity(), TranscriberListener {
         setCard.addView(label("확정 인식 방식", 13f), lp(top = 6))
         spMode = spinner(FinalMode.values().map { it.label }, "mode2", 0) { refreshModels() }
         setCard.addView(spMode)
-        setCard.addView(label("위스퍼 크기", 13f), lp(top = 6))
+        setCard.addView(label("위스퍼 크기 (위스퍼만 쓸 때)", 13f), lp(top = 6))
         spWhisper = spinner(listOf("작은 것 (빠름)", "큰 것 (정확, 느림)"), "whisper", 0) { refreshModels() }
         setCard.addView(spWhisper)
         setCard.addView(label("잡음 제거", 13f), lp(top = 6))
@@ -468,10 +468,12 @@ class MainActivity : Activity(), TranscriberListener {
         val best = rows.firstOrNull() ?: return
         val outs = r.outputs[best.key] ?: return
         val unsure = r.uncertain[best.key]
-        val mem = r.members[best.key]
         outs.forEachIndexed { i, t ->
             if (t.isBlank()) return@forEachIndexed
-            val fr = FinalResult(t, unsure?.getOrNull(i) ?: emptySet(), mem?.getOrNull(i) ?: emptyMap(), r.segStartMs[i], r.segStartMs[i], 0)
+            // 문장을 누르면 모든 방식의 결과를 정확도 순으로 보여 줌
+            val all = LinkedHashMap<String, String>()
+            rows.forEach { row -> all[row.key] = r.outputs[row.key]?.getOrNull(i) ?: "" }
+            val fr = FinalResult(t, unsure?.getOrNull(i) ?: emptySet(), all, r.segStartMs[i], r.segStartMs[i], 0)
             lines += fr; lineOffsets += 0L
             linesBox.addView(lineView(fr, 0), lp(top = 6))
         }
@@ -602,8 +604,7 @@ class MainActivity : Activity(), TranscriberListener {
         if (r.hyps.size > 1) {
             val detail = TextView(this).apply {
                 val sb = SpannableStringBuilder()
-                Engines.ORDER.forEach { name ->
-                    val h = r.hyps[name] ?: return@forEach
+                r.hyps.forEach { (name, h) ->
                     val s = sb.length
                     sb.append(name).append("  ")
                     sb.setSpan(ForegroundColorSpan(cAccent), s, s + name.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -700,9 +701,9 @@ class MainActivity : Activity(), TranscriberListener {
             sb.append(String.format(Locale.KOREA, "%5.1f%%  %2d/%d  %s\n", acc, hit, terms.size, name))
         }
         row("최종 결과", lines.joinToString("") { it.text })
-        Engines.ORDER.forEach { name ->
-            if (lines.any { it.hyps.containsKey(name) }) row(name, lines.joinToString("") { it.hyps[name] ?: "" })
-        }
+        val names = LinkedHashSet<String>()
+        lines.forEach { names.addAll(it.hyps.keys) }
+        names.forEach { name -> row(name, lines.joinToString("") { it.hyps[name] ?: "" }) }
         sb.append("대략 95% 이상이면 회의록으로 쓸 만합니다")
         compareView.text = sb.toString()
     }

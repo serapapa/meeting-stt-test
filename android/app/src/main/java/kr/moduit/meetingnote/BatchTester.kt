@@ -10,8 +10,6 @@ class BatchResult(
     val decodeMs: LinkedHashMap<String, Long>,
     /** 합치기 방식의 문장별 불확실 글자 위치 */
     val uncertain: Map<String, List<Set<Int>>>,
-    /** 문장별 모델 결과 (화면에 보여 줄 때 씀): 방식 이름 → 문장별 {모델 이름 → 결과} */
-    val members: Map<String, List<Map<String, String>>>,
 )
 
 /**
@@ -72,23 +70,19 @@ class BatchTester(
             } finally { rec.release() }
         }
 
-        // 4) 세 모델 합치기 조합
+        // 4) 세 모델 합치기: 위스퍼 큰 것 + 작은 것 + SenseVoice
         val uncertain = mutableMapOf<String, List<Set<Int>>>()
-        val members = mutableMapOf<String, List<Map<String, String>>>()
-        for (w in listOf(Models.WHISPER_TURBO, Models.WHISPER_SMALL)) {
-            for (suffix in variants.keys) {
-                val wk = w.label + suffix; val sk = Models.SENSE_VOICE.label + suffix; val kk = Models.OFFLINE_KO.label + suffix
-                val wo = outputs[wk] ?: continue; val so = outputs[sk] ?: continue; val ko = outputs[kk] ?: continue
-                val key = "합치기 [${w.label}+SenseVoice+한국어 전용]$suffix"
-                val combined = segs.indices.map { i -> Combiner.combine(listOf(wo[i], so[i], ko[i])) }
-                outputs[key] = combined.map { it.text }
-                uncertain[key] = combined.map { it.uncertain }
-                members[key] = segs.indices.map { i -> mapOf(Engines.WHISPER to wo[i], Engines.SENSE_VOICE to so[i], Engines.OFFLINE_KO to ko[i]) }
-                // 실제로는 세 모델이 동시에 돌기 때문에 가장 느린 모델 시간에 가깝다
-                decodeMs[key] = maxOf(decodeMs[wk] ?: 0, decodeMs[sk] ?: 0, decodeMs[kk] ?: 0)
-            }
+        for (suffix in variants.keys) {
+            val lk = Models.WHISPER_TURBO.label + suffix; val sk = Models.WHISPER_SMALL.label + suffix; val vk = Models.SENSE_VOICE.label + suffix
+            val lo = outputs[lk] ?: continue; val so = outputs[sk] ?: continue; val vo = outputs[vk] ?: continue
+            val key = "합치기 [위스퍼 큰 것+작은 것+SenseVoice]$suffix"
+            val combined = segs.indices.map { i -> Combiner.combine(listOf(lo[i], so[i], vo[i])) }
+            outputs[key] = combined.map { it.text }
+            uncertain[key] = combined.map { it.uncertain }
+            // 실제로는 세 모델이 동시에 돌기 때문에 가장 느린 모델 시간에 가깝다
+            decodeMs[key] = maxOf(decodeMs[lk] ?: 0, decodeMs[sk] ?: 0, decodeMs[vk] ?: 0)
         }
 
-        return BatchResult(segs.map { it.first * 1000 / 16000 }, audioSec, outputs, decodeMs, uncertain, members)
+        return BatchResult(segs.map { it.first * 1000 / 16000 }, audioSec, outputs, decodeMs, uncertain)
     }
 }
