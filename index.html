@@ -71,6 +71,14 @@ textarea{width:100%;font:inherit;font-size:.92rem;border:1px solid var(--line);b
 .row-btn button{flex:1 1 auto;min-height:40px;padding:8px 12px;font-size:.88rem}
 .confirm{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:.88rem;color:var(--rec)}
 ol.check{margin:0;padding-left:20px;font-size:.88rem;color:var(--ink);display:flex;flex-direction:column;gap:4px}
+.script{background:var(--paper);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:14px;padding:14px 18px;display:flex;flex-direction:column;gap:10px}
+.script-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.script-head h2{font-size:.78rem;letter-spacing:.06em;color:var(--accent);margin:0;font-weight:600}
+.script-head .hint{margin:0}
+.script-text{margin:0;font-size:1.2rem;line-height:1.85;max-width:62em;word-break:keep-all}
+.script-terms .terms{margin-top:6px}
+details{margin-top:8px}
+summary{cursor:pointer}
 select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--paper);color:var(--ink);width:100%}
 </style>
 </head>
@@ -87,6 +95,23 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
   </header>
 
   <div id="notice" hidden></div>
+
+  <section class="script" aria-label="읽을 원고">
+    <div class="script-head">
+      <h2>읽을 원고</h2>
+      <span class="hint">‘받아쓰기 시작’을 누른 뒤 평소 회의하듯 소리 내어 읽어 주세요. 약 1분 분량입니다.</span>
+    </div>
+    <p class="script-text">오늘 회의는 회의 보조 서비스의 첫 시범판 결과를 공유하는 자리입니다. 지금은 태블릿에 내장된 음성인식으로 한국어 받아쓰기를 시험하고 있고, 결과물은 깃허브 페이지에 올려 두었습니다. 다음 단계는 사용자가 구글 드라이브나 노션 같은 저장소를 연결하면, 대화 내용과 관련된 자료를 화면 옆에 카드로 띄워 주는 기능입니다. 비용은 회의 한 시간 기준으로 음성인식과 AI 호출을 합쳐 계산해야 하고, 무료 요금제와 유료 요금제의 차이는 인식 정확도로 두려고 합니다. 고객사 요구사항은 다음 주 화요일까지 정리하고, 견적과 일정은 그다음 주에 확정하겠습니다.</p>
+    <div class="script-terms">
+      <span class="hint">원고 속 확인할 용어 — 받아쓴 기록에서 노란색으로 표시하고 몇 번 잡혔는지 셉니다</span>
+      <div class="terms" id="termChips"></div>
+      <details>
+        <summary class="hint">용어 바꾸기</summary>
+        <label for="terms" class="hint" style="display:block;margin:6px 0">쉼표로 나눠 입력하세요.</label>
+        <textarea id="terms">회의 보조 서비스, 음성인식, 깃허브, 구글 드라이브, 노션, 저장소, 요금제, 요구사항, 견적, 일정</textarea>
+      </details>
+    </div>
+  </section>
 
   <div class="grid">
     <section class="sheet" aria-label="받아쓰기 기록">
@@ -112,13 +137,6 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
           <dt>인식 확신도 평균</dt><dd id="mConf">–</dd>
         </dl>
         <p class="hint">끊김은 음성인식이 스스로 멈췄다가 다시 붙은 구간입니다. 이 사이에 한 말은 빠졌을 수 있습니다.</p>
-      </div>
-
-      <div class="panel">
-        <h2>잘 알아듣는지 볼 용어</h2>
-        <label for="terms" class="hint" style="display:block;margin:0 0 6px">쉼표로 나눠 입력하면 기록에서 노란색으로 표시하고 몇 번 잡혔는지 셉니다.</label>
-        <textarea id="terms">자산관리, 제안서, 요구사항, 일정, 견적, 클로드</textarea>
-        <div class="terms" id="termChips"></div>
       </div>
 
       <div class="panel">
@@ -149,11 +167,11 @@ select{font:inherit;font-size:.92rem;border:1px solid var(--line);border-radius:
       <div class="panel">
         <h2>시험해 볼 것</h2>
         <ol class="check">
-          <li>혼자 또박또박 1분 읽기 — 기본 정확도</li>
+          <li>위 원고를 소리 내어 읽기 — 기본 정확도</li>
           <li>평소 회의 말투로 5분 — 끊김 횟수와 빠진 말</li>
           <li>두 사람이 번갈아 말하기 — 말이 겹칠 때</li>
           <li>태블릿을 1~2m 떨어뜨려 놓기 — 회의실 거리</li>
-          <li>용어 칸에 실제 업무 용어 넣고 말해 보기</li>
+          <li>‘용어 바꾸기’에 실제 업무 용어 넣고 말해 보기</li>
           <li>30분 이상 켜 두기 — 발열·배터리·화면 꺼짐</li>
         </ol>
       </div>
